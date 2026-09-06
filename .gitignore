@@ -1,0 +1,10 @@
+build/
+
+# local only, never shipped
+.map/
+tests/
+mockups/
+CLAUDE.md
+PLAN.md
+AUDIT.md
+ROADMAP.md
