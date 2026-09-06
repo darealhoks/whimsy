@@ -60,6 +60,16 @@ Monocypher. Nothing else parses input.
 
 This is a fair warning, AI was used to help write this app, if you're not comfortable with that just don't use it. The app is designed to be as secure as possible, privacy leaks are extremely unlikely - however they're still a possibility (as with any app, with or without AI).
 
+## No warranty, and your law is your problem
+
+This is a hobby project given away for free. It comes with **no warranty of any kind** —
+see `LICENSE`. It has not had an independent security audit. Do not bet anything on it that
+you cannot afford to lose.
+
+It is also cryptography. Writing, publishing, importing, exporting or *using* strong
+encryption is restricted or illegal in some countries, and some places can compel you to
+hand over a passphrase. Whether you may run this is on you, not on me.
+
 ## Licence
 
 MIT, see `LICENSE`. [Monocypher](https://monocypher.org) 4.0.2 under its CC0 option,
