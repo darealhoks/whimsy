@@ -8,9 +8,16 @@ Only has groups with channels; a DM is a group of two. The server is a dumb rela
 ciphertext for 30 days and knows nothing else. Nobody joins without an invite minted by
 whoever runs that server.
 
-C11, Monocypher vendored, no other dependency in the core. The GUI wants SDL3 and FreeType.
+C11, Monocypher vendored, no other dependency in the core. The GUI wants SDL3 and FreeType, plus vendored stb image headers.
 
-## Get started
+## Install
+
+    curl -fsSL https://raw.githubusercontent.com/darealhoks/whimsy/main/install.sh | sh
+
+Builds release from source into `~/.local/share/whimsy/src`, installs `whimsy` and
+`whimsyd` to `~/.local/bin` and a desktop entry. Re-run it to update.
+
+## Build it yourself
 
     make                       dev build, -Werror + ASan/UBSan   -> build/dev/
     make MODE=release          -> build/release/
@@ -23,7 +30,8 @@ Run a relay and mint yourself an invite:
     whimsyd serve  ~/.local/share/whimsyd 7717
     whimsyd invite ~/.local/share/whimsyd myhost:7717
 
-That prints one single-use url. Start `whimsy`, paste it, pick a passphrase. Then `:help`.
+That prints one single-use url, good for 7 days. Start `whimsy`, paste it, pick a passphrase
+(empty keeps a 0600 keyfile instead). Then type `:` to see every command.
 
 ## Who knows what
 
@@ -44,6 +52,8 @@ No device key sync either; a second device is a second identity, linked to the f
       wire.c             frame and blob encode/decode
       noise.c net.c      Noise_IK handshake, tcp, framing
       identity.c         seed, keys, fingerprint
+      crypto.c           the monocypher wrappers everything else calls
+      colour.c           a key's colour, oklch hue from its first byte
       group.c            membership records, sender chains, message crypto
       store.c            encrypted append-only record file
       text.c             utf-8 validate, strip controls, cell width
@@ -58,17 +68,16 @@ Monocypher. Nothing else parses input.
 
 ## AI disclosure
 
-This is a fair warning, AI was used to help write this app, if you're not comfortable with that just don't use it. The app is designed to be as secure as possible, privacy leaks are extremely unlikely - however they're still a possibility (as with any app, with or without AI).
+This is a fair warning, AI was used to help write this app, if you're not comfortable with that just don't use it. The app is designed to be as secure and private as possible, severe vulns and privacy leaks are unlikely - however they're still a possibility (but thats with any app, with or without AI).
 
-## No warranty, and your law is your problem
+## No warranty
 
-This is a hobby project given away for free. It comes with **no warranty of any kind** —
-see `LICENSE`. It has not had an independent security audit. Do not bet anything on it that
-you cannot afford to lose.
+This is a hobby project written for fun. It comes with **no warranty of any kind**.
+(see `LICENSE`). Do not bet anything on it that you cannot afford to lose.
 
 It is also cryptography. Writing, publishing, importing, exporting or *using* strong
 encryption is restricted or illegal in some countries, and some places can compel you to
-hand over a passphrase. Whether you may run this is on you, not on me.
+hand over a passphrase. Whether you may 
 
 ## Licence
 
