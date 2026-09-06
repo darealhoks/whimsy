@@ -68,16 +68,7 @@ Monocypher. Nothing else parses input.
 
 ## AI disclosure
 
-This is a fair warning, AI was used to help write this app, if you're not comfortable with that just don't use it. The app is designed to be as secure and private as possible, severe vulns and privacy leaks are unlikely - however they're still a possibility (but thats with any app, with or without AI).
-
-## No warranty
-
-This is a hobby project written for fun. It comes with **no warranty of any kind**.
-(see `LICENSE`). Do not bet anything on it that you cannot afford to lose.
-
-It is also cryptography. Writing, publishing, importing, exporting or *using* strong
-encryption is restricted or illegal in some countries, and some places can compel you to
-hand over a passphrase. Whether you may 
+Fair warning: AI was used to help write this app, if you're not comfortable with that just don't use it. The app is designed to be as secure and private as possible. Severe vulns are unlikely but possible (but thats with any app, with or without AI).
 
 ## Licence
 
