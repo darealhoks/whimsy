@@ -14,8 +14,6 @@ C11, Monocypher vendored, no other dependency in the core. The GUI wants SDL3 an
 
     make                       dev build, -Werror + ASan/UBSan   -> build/dev/
     make MODE=release          -> build/release/
-    make test
-    make fuzz                  clang
 
 You get `libwhimsy.a`, `whimsyd` (the relay), and `whimsy` (the client, if pkg-config
 finds sdl3 and freetype2).
@@ -52,7 +50,6 @@ No device key sync either; a second device is a second identity, linked to the f
       whimsy*.c          the public api behind core/whimsy.h
     server/whimsyd.c     epoll relay: register, put, fetch, ack, revoke, invites, ttl sweep
     gui/                 the client: SDL3 window, freetype atlas, panes, commands, markdown
-    tests/               test_*.c self-checking binaries, fuzz_*.c libFuzzer targets
 
 Four places parse untrusted bytes: `wire_decode`, `text_sanitize`, `store_read`, and
 Monocypher. Nothing else parses input.
