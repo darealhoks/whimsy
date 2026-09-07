@@ -41,6 +41,7 @@
 #define BLOB_NAME_LEN 85        /* 20 digit seq + '.' + 64 hex putter account */
 #define MAIL_MAX    1024        /* blobs one mailbox may hold before a PUT is refused */
 #define MAIL_BYTES  (64u << 20)
+#define SWEEP_BOXES 32          /* mailboxes one sweep tick walks before resuming next tick */
 #define OUT_MAX     (1u << 18)  /* a fetch stops filling c->out past this; the client refetches */
 #define FETCH_BLOBS 256         /* blobs one fetch streams; must stay under FETCH_MAX in
                                  * core/whimsy.c, which drops the socket at it */
@@ -309,50 +310,42 @@ static void do_register(struct conn *c, const struct wire_frame *f)
 	put_simple(c, WIRE_F_DONE);
 }
 
-/* 0 to accept, -1 to refuse. when the box is at either cap the sender holding the most
- * blobs loses its oldest, so no one sender can hold a mailbox against the others.
- * o(n) per put, and o(n) again per eviction; a fetch drains a mailbox */
+/* 0 to accept, -1 to refuse. a full box costs the putter its own oldest blob and only
+ * ever its own: no put can steer a deletion onto another account's ciphertext.
+ * ponytail: one readdir+stat pass per put (<= MAIL_MAX entries), and at most EVICT
+ * evictions; a per-mailbox counter file if that pass ever shows up in a profile */
 static int mail_admit(const char *dir, size_t adding, const char *tag)
 {
-	for (int round = 0; round < 8; round++) {
-		DIR *d = opendir(dir);
-		if (!d) return 0;
-		struct { char tag[65], oldest[96]; unsigned long n; } t[16] = { { { 0 }, { 0 }, 0 } };
-		int nt = 0;
-		unsigned long n = 0, bytes = adding;
-		struct dirent *e;
-		while ((e = readdir(d))) {
-			char p[PATHMAX];
-			struct stat st;
-			if (e->d_name[0] == '.' || PJ(p, "%s/%s", dir, e->d_name) || stat(p, &st)) continue;
-			n++;
-			bytes += (unsigned long)st.st_size;
-			/* names are BLOB_NAME_LEN long, "<20 digit seq>.<putter account hex>",
-			 * so they sort oldest first and carry who may revoke */
-			const char *who = strlen(e->d_name) == BLOB_NAME_LEN ? e->d_name + 21 : "";
-			int i = 0;
-			while (i < nt && strcmp(t[i].tag, who)) i++;
-			if (i == nt) {
-				if (nt == 16) continue;  /* ponytail: a 17th sender goes untallied */
-				nt++;
-				snprintf(t[i].tag, sizeof t[i].tag, "%s", who);
-				snprintf(t[i].oldest, sizeof t[i].oldest, "%s", e->d_name);
-			} else if (strcmp(e->d_name, t[i].oldest) < 0) {
-				snprintf(t[i].oldest, sizeof t[i].oldest, "%s", e->d_name);
-			}
-			t[i].n++;
-		}
-		closedir(d);
-		if (n < MAIL_MAX && bytes <= MAIL_BYTES) return 0;
-		int top = 0;
-		for (int i = 1; i < nt; i++)
-			if (t[i].n > t[top].n) top = i;
+	enum { EVICT = 8 };
+	DIR *d = opendir(dir);
+	if (!d) return 0;
+	struct { char name[BLOB_NAME_LEN + 1]; unsigned long size; } mine[EVICT];
+	int nm = 0;
+	unsigned long n = 0, bytes = adding;
+	struct dirent *e;
+	while ((e = readdir(d))) {
 		char p[PATHMAX];
-		if (!nt || !strcmp(t[top].tag, tag) || PJ(p, "%s/%s", dir, t[top].oldest) ||
-		    unlink(p))
-			return -1;
+		struct stat st;
+		if (e->d_name[0] == '.' || PJ(p, "%s/%s", dir, e->d_name) || stat(p, &st)) continue;
+		n++;
+		bytes += (unsigned long)st.st_size;
+		/* names are BLOB_NAME_LEN long, "<20 digit seq>.<putter account hex>", so they
+		 * sort oldest first and carry who may drop them */
+		if (strlen(e->d_name) != BLOB_NAME_LEN || strcmp(e->d_name + 21, tag)) continue;
+		if (nm == EVICT && strcmp(e->d_name, mine[EVICT - 1].name) > 0) continue;
+		int i = nm < EVICT ? nm++ : EVICT - 1;
+		for (; i && strcmp(e->d_name, mine[i - 1].name) < 0; i--) mine[i] = mine[i - 1];
+		snprintf(mine[i].name, sizeof mine[i].name, "%s", e->d_name);
+		mine[i].size = (unsigned long)st.st_size;
 	}
-	return -1;
+	closedir(d);
+	for (int i = 0; (n >= MAIL_MAX || bytes > MAIL_BYTES) && i < nm; i++) {
+		char p[PATHMAX];
+		if (PJ(p, "%s/%s", dir, mine[i].name) || unlink(p)) break;
+		n--;
+		bytes -= mine[i].size;
+	}
+	return n >= MAIL_MAX || bytes > MAIL_BYTES ? -1 : 0;
 }
 
 static void do_put(struct conn *c, const struct wire_frame *f)
@@ -564,11 +557,18 @@ static void sweep(void)
 	if (!d) return;
 	struct dirent *e;
 	char box[PATHMAX];
+	/* a tick walks SWEEP_BOXES mailboxes and resumes at the next one: bounded stall on a
+	 * populated relay, at the cost of a ttl that lags when there are many mailboxes */
+	static unsigned long skip;
+	unsigned long seen = 0, done = 0;
 	while ((e = readdir(d))) {
 		if (e->d_name[0] == '.') continue;
+		if (seen++ < skip) continue;
+		if (done++ >= SWEEP_BOXES) break;
 		if (PJ(box, "%s/mail/%s", datadir, e->d_name)) continue;
 		sweep_files(box, now - BLOB_TTL);
 	}
+	skip = e ? skip + done : 0;
 	closedir(d);
 }
 

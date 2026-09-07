@@ -12,8 +12,8 @@
  * body never needs a bump and never costs anyone their identity. Bump this only when
  * these bytes change shape. */
 
-#define STORE_VER      5
-#define STORE_HDR      60
+#define STORE_VER      6
+#define STORE_HDR      84
 #define STORE_MAX_REC  (65536 + 512)
 
 /* argon2id floor, not a default: a header asking for less is refused */
@@ -74,7 +74,8 @@ int store_replace(struct store *s, size_t i, uint8_t kind, const void *rec, size
 int store_void_many(struct store *s, const size_t *idx, size_t n);
 
 size_t store_count(const struct store *s);
-/* NULL when i is out of range; the bytes live until store_close */
+/* NULL when i is out of range; the bytes live until store_close, or until the next
+ * store_replace or store_void_many, either of which frees the bodies it swaps out */
 const uint8_t *store_get(const struct store *s, size_t i, uint8_t *kind, size_t *n);
 
 #endif

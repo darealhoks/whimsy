@@ -124,7 +124,7 @@ static int do_register(struct whimsy *w, const struct wire_invite *v)
 
 int whimsy_connect(struct whimsy *w, const char *invite)
 {
-	struct wire_invite v;
+	struct wire_invite v = { 0 };
 	if (invite) {
 		if (wire_decode_invite(invite, &v) != WIRE_OK) return WHIMSY_EARG;
 	} else {
@@ -172,15 +172,17 @@ size_t term(char *out, size_t cap, size_t w)
 {
 	if (!cap) return w;
 	size_t end = w < cap - 1 ? w : cap - 1;
-	size_t i = end;
-	while (i > 0 && ((unsigned char)out[i - 1] & 0xC0) == 0x80) i--;
-	if (i > 0) {
-		unsigned char lead = (unsigned char)out[i - 1];
+	/* scanning forward, not back from end: a truncated sanitize leaves the last few
+	 * bytes below cap never written, and only lead bytes of whole sequences are read */
+	size_t i = 0;
+	while (i < end) {
+		unsigned char lead = (unsigned char)out[i];
 		size_t need = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2 :
 		              (lead & 0xF0) == 0xE0 ? 3 : (lead & 0xF8) == 0xF0 ? 4 : 1;
-		if (i - 1 + need > end) end = i - 1;
+		if (i + need > end) break;
+		i += need;
 	}
-	out[end] = 0;
+	out[i] = 0;
 	return w;
 }
 

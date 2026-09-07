@@ -501,7 +501,7 @@ int group_recv_senderkey(struct group *g, const struct identity *me,
 		uint8_t gid[16];
 		int e = rec_check(g, sk->rec.signed_from, sk->rec.signed_n + SIG, &r, gid);
 		if (e) return e;
-		if (g->rec_n && !rec_has(&r, me->pk)) return GROUP_EKICKED;
+		if (!rec_has(&r, me->pk)) return g->rec_n ? GROUP_EKICKED : GROUP_EMEMBER;
 		e = group_apply_rec(g, sk->rec.signed_from, sk->rec.signed_n + SIG);
 		if (e) return e;
 	}
@@ -524,6 +524,13 @@ int group_recv_senderkey(struct group *g, const struct identity *me,
 		if (sk->index == c->base && wc_equal(sk->cid, c->cid, 32) &&
 		    wc_equal(sk->ck, c->ck, 32)) return GROUP_OK;
 		if (sk->index <= c->base) return GROUP_EOLD;
+		/* a fresh cid resets seen[], so it must start past every index already
+		 * accepted: a msgid is sender | index and an EDIT resolves by it */
+		for (uint32_t d = GROUP_SKIP; d-- > 0;)
+			if (c->seen[d / 8] & 1u << d % 8) {
+				if (sk->index <= c->base + d) return GROUP_EOLD;
+				break;
+			}
 	} else {
 		if (g->nrecv == GROUP_MAX_MEMBERS) return GROUP_EFULL;
 		c = &g->recv[g->nrecv++];

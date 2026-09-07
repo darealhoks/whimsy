@@ -105,7 +105,7 @@ static const struct range wide[] = {
 /* invisible or direction-flipping: dropped outright, not measured. keeping them
  * would let a sender hide or reorder what a reader sees */
 static const struct range drop[] = {
-	{0xAD,0xAD},{0x600,0x605},{0x61C,0x61C},{0x180E,0x180E},{0x1160,0x11FF},
+	{0xAD,0xAD},{0x600,0x605},{0x61C,0x61C},{0x1160,0x11FF},{0x180E,0x180E},
 	{0x200B,0x200B},{0x200E,0x200F},{0x202A,0x202E},{0x2060,0x206F},{0x3164,0x3164},
 	{0xD7B0,0xD7C6},{0xD7CB,0xD7FB},{0xFEFF,0xFEFF},{0xFFA0,0xFFA0},{0xFFF9,0xFFFB},
 	{0x110BD,0x110BD},{0x110CD,0x110CD},{0x13430,0x1343F},{0x1BCA0,0x1BCA3},
@@ -147,6 +147,22 @@ size_t text_step(const void *sv, size_t n, uint32_t *cp)
 	if (v < lo || v > 0x10FFFF || (v >= 0xD800 && v <= 0xDFFF)) return need;
 	*cp = v;
 	return need;
+}
+
+static int sorted(const struct range *r, size_t n)
+{
+	for (size_t i = 0; i < n; i++) {
+		if (r[i].lo > r[i].hi) return 0;
+		if (i && r[i].lo <= r[i - 1].hi) return 0;
+	}
+	return 1;
+}
+
+int text_tables_sorted(void)
+{
+	return sorted(zerow, sizeof zerow / sizeof *zerow)
+	    && sorted(wide, sizeof wide / sizeof *wide)
+	    && sorted(drop, sizeof drop / sizeof *drop);
 }
 
 int text_cp_width(uint32_t cp)

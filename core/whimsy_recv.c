@@ -207,9 +207,12 @@ static int ingest(struct whimsy *w, const uint8_t *b, size_t n)
 	struct grp *gr = NULL;
 	struct group_msg m;
 	int e = GROUP_ENOCHAIN;
-	for (size_t i = 0; i < w->ng && e == GROUP_ENOCHAIN; i++) {
-		gr = w->g[i];
-		e = group_recv(&gr->g, b, n, w->scratch, sizeof w->scratch, &m);
+	/* a cid is attacker-chosen cleartext and can collide across groups, so a chain that
+	 * matches the blob but does not open it must not end the search */
+	for (size_t i = 0; i < w->ng; i++) {
+		int ge = group_recv(&w->g[i]->g, b, n, w->scratch, sizeof w->scratch, &m);
+		if (!ge) { gr = w->g[i]; e = GROUP_OK; break; }
+		if (e == GROUP_ENOCHAIN) e = ge;
 	}
 
 	if (e == GROUP_ENOCHAIN) {

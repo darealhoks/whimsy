@@ -14,13 +14,15 @@
 #define MAGIC  "whimsy"
 #define MAGIC_N 6
 
-/* header: magic[6] ver mode blocks[4] passes[4] lanes[4] salt[16] count[8] mac[16]
+/* header: magic[6] ver mode blocks[4] passes[4] lanes[4] salt[16] count[8] nonce[24] mac[16]
  * the mac seals an empty plaintext over the 44 bytes before it, so a wrong key
  * is a header failure and not a first-record failure. count is the sealed record
  * total: it is what makes a truncated tail detectable, and it is rewritten after
- * every append, so a store found with fewer records than this is corrupt */
+ * every append, so a store found with fewer records than this is corrupt. the nonce
+ * is redrawn on every header write: the key is the same across them all */
 #define HDR_COUNT 36
-#define HDR_MAC   44
+#define HDR_NONCE 44
+#define HDR_MAC   68
 
 enum { MODE_PASS = 1, MODE_KEYFILE = 2 };
 
@@ -138,8 +140,16 @@ static int derive(uint8_t key[32], const uint8_t hdr[STORE_HDR], const char *dir
 
 static void hdr_mac(uint8_t mac[16], const uint8_t key[32], const uint8_t hdr[STORE_HDR])
 {
-	uint8_t nonce[WC_NONCE] = { 0 }; /* one seal per key, so a fixed nonce is safe */
-	wc_seal(mac, key, nonce, hdr, HDR_MAC, NULL, 0);
+	wc_seal(mac, key, hdr + HDR_NONCE, hdr, HDR_NONCE, NULL, 0);
+}
+
+/* a rename or a create is only durable once the directory entry is */
+static void sync_dir(const char *dir)
+{
+	int fd = open(dir, O_RDONLY | O_DIRECTORY);
+	if (fd < 0) return;
+	fsync(fd);
+	close(fd);
 }
 
 /* the record is durable before this runs, so a header left behind is survivable:
@@ -147,6 +157,7 @@ static void hdr_mac(uint8_t mac[16], const uint8_t key[32], const uint8_t hdr[ST
 static void sync_hdr(struct store *s)
 {
 	st64(s->hdr + HDR_COUNT, s->nrec);
+	wc_random(s->hdr + HDR_NONCE, WC_NONCE);
 	hdr_mac(s->hdr + HDR_MAC, s->key, s->hdr);
 	for (size_t at = 0; at < STORE_HDR; ) {
 		ssize_t w = pwrite(s->fd, s->hdr + at, STORE_HDR - at, (off_t)at);
@@ -222,6 +233,8 @@ int store_open(struct store **out, const char *dir, const char *pass, size_t *ba
 	uint8_t *b;
 	size_t n;
 	if (read_all(path, &b, &n, NULL)) return STORE_EIO;
+	/* a crash between the create and the header write: no store, not a broken one */
+	if (b && !n) { free(b); b = NULL; }
 
 	struct store *s = calloc(1, sizeof *s);
 	if (!s) { free(b); return STORE_ENOMEM; }
@@ -241,6 +254,7 @@ int store_open(struct store **out, const char *dir, const char *pass, size_t *ba
 		st32(hdr + 16, pass ? STORE_ARGON2_LANES : 0);
 		wc_random(hdr + 20, 16);
 		st64(hdr + HDR_COUNT, 0);
+		wc_random(hdr + HDR_NONCE, WC_NONCE);
 		e = derive(s->key, hdr, dir, pass);
 		if (!e) {
 			hdr_mac(hdr + HDR_MAC, s->key, hdr);
@@ -249,6 +263,7 @@ int store_open(struct store **out, const char *dir, const char *pass, size_t *ba
 			else {
 				e = write_all(fd, hdr, STORE_HDR) || fsync(fd) ? STORE_EIO : STORE_OK;
 				close(fd);
+				if (!e) sync_dir(dir);
 			}
 		}
 	} else if (n < STORE_HDR || memcmp(b, MAGIC, MAGIC_N) || b[6] != STORE_VER) {
@@ -359,6 +374,7 @@ static int rewrite(struct store *s, const uint8_t hdr[STORE_HDR], const uint8_t 
 	if (!e && nfd < 0) e = STORE_EIO;
 	if (!e && rename(tmp, path)) { close(nfd); e = STORE_EIO; }
 	if (e) { unlink(tmp); return e; }
+	sync_dir(s->dir);
 
 	close(s->fd);
 	s->fd = nfd;
@@ -388,6 +404,7 @@ int store_rekey(struct store *s, const char *oldpass, const char *newpass)
 	st32(hdr + 16, newpass ? STORE_ARGON2_LANES : 0);
 	wc_random(hdr + 20, 16);
 	st64(hdr + HDR_COUNT, s->nrec);
+	wc_random(hdr + HDR_NONCE, WC_NONCE);
 	/* keyfile mode with no keyfile yet creates one; this is what makes the derive
 	 * below reproducible on the next open */
 	if ((e = derive(key, hdr, s->dir, newpass))) return e;

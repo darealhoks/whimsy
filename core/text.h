@@ -22,6 +22,9 @@ size_t text_sanitize(void *out, size_t cap, const void *in, size_t n);
  * *cp is U+FFFD for an invalid sequence. */
 size_t text_step(const void *s, size_t n, uint32_t *cp);
 
+/* inset() binary-searches the range tables; test_text.c asserts this */
+int text_tables_sorted(void);
+
 int text_cp_width(uint32_t cp);         /* terminal cells: 0, 1 or 2 */
 int text_width(const void *s, size_t n);
 
