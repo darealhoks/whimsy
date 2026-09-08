@@ -8,6 +8,8 @@
 
 /* ---- log ---- */
 
+#define ROWPAD 5                /* mockups/style.css .msg: 5px above and below the text */
+
 static size_t prev_in_chan(struct ui *u, size_t i, uint16_t id)
 {
 	struct whimsy_msg m;
@@ -136,12 +138,20 @@ static void file_body(struct ui *u, size_t i, float bw, struct fbody *f)
 	f->nl = file_lines(f->prev, sn, f->off, f->len, PREV_LINES);
 }
 
+/* the audio card: two rows inside a 1px frame. draw_row_msg lays it out to match */
+#define AUD_W 320
+#define AUD_PADX 10
+#define AUD_PADY 8
+#define AUD_ROWGAP 5
+
+static float aud_h(float lh) { return lh * 2 + AUD_ROWGAP + AUD_PADY * 2 + 2; }
+
 static float file_h(struct ui *u, size_t i, float bw)
 {
 	struct fbody f;
 	float lh = draw_line_height(u->d);
 	file_body(u, i, bw, &f);
-	if (f.aext) return lh * 2 + u->c->gap;
+	if (f.aext) return aud_h(lh) + u->c->gap;
 	if (f.t) return lh + f.ih + u->c->gap;
 	if (f.nl) return lh + (float)f.nl * lh + u->c->gap;
 	return lh;
@@ -225,7 +235,7 @@ float row_height(struct ui *u, size_t i, float bw)
 	n = m.text_n;
 	row_shape(u, i, &m, &head, &date);
 	if (m.blocked) {            /* the placeholder row: same shape as the separators above */
-		float bh = lh + 5 + (head ? lh : 0) + (date ? lh + c->gap : 0);
+		float bh = lh + ROWPAD * 2 + (head ? lh : 0) + (date ? lh + c->gap : 0);
 		if (i == u->newat) bh += lh + c->gap;
 		if (i < u->nrh) u->rh[i] = bh;
 		return bh;
@@ -234,7 +244,7 @@ float row_height(struct ui *u, size_t i, float bw)
 	int nmr = n ? md_scan(b, n, mr, 64) : 0;
 	struct wrapctx wc = {u->d, b, mr, nmr};
 	int nl = n ? wrap_lines(b, n, bw, wrap_md, &wc, starts, MAXWRAP) : 1;
-	float h = 5 + (head ? lh : 0) + (date ? lh + c->gap : 0);
+	float h = ROWPAD * 2 + (head ? lh : 0) + (date ? lh + c->gap : 0);
 	for (int k = 0; k < nl; k++)
 		h += lh * (n ? draw_style_scale(md_font(style_at(mr, nmr, starts[k]))) : 1);
 	if (i == u->newat) h += lh + c->gap;
@@ -460,14 +470,18 @@ static void hover_strip(struct ui *u)
 
 	float ph = lh + pad * 2, pw = w + pad * 2;
 	float px = u->strip_x - pw, py = u->strip_y - pad;
-	float rad = c->radius / 2 + 2;
+	float rad = c->radius;
+	/* the same raised surface profile_card uses: written over the window's own alpha,
+	 * so the glass behind it does not read through */
+	uint8_t surf[3];
+	for (int k = 0; k < 3; k++) surf[k] = (uint8_t)((c->bg[k] * 3 + c->line[k]) / 4);
 	draw_rect(u->d, px, py, pw, ph, c->line, 120, rad);
-	draw_rect(u->d, px + 1, py + 1, pw - 2, ph - 2, c->bg, 165, rad - 1);
+	draw_rect_over(u->d, px + 1, py + 1, pw - 2, ph - 2, surf, 250, rad - 1);
 
 	float x = px + pad;
 	for (int k = 0; k < n; k++) {
 		if (k == nre && nre && nre < n) {
-			draw_rule(u->d, x + step - 1, py + pad / 2, 1, c->line);
+			draw_rect(u->d, x + step - 1, py + (ph - lh) / 2, 1, lh, c->line, 255, 0);
 			x += step * 2;
 		}
 		float tw = draw_measure(u->d, it[k].s, it[k].n, DRAW_REGULAR);
@@ -475,6 +489,62 @@ static void hover_strip(struct ui *u)
 		hit_top(u, x - step / 2, py, it[k].w + step, ph, it[k].kind, i, it[k].b);
 		x += it[k].w + step;
 	}
+}
+
+/* the .aud card: name, save, copy over play, track, elapsed/total, in one framed box */
+static void audio_card(struct ui *u, size_t i, float bx, float y, float bw,
+                       const char *name, size_t nn)
+{
+	struct conf *c = u->c;
+	float lh = draw_line_height(u->d);
+	float cw = bw < AUD_W ? bw : AUD_W, ch = aud_h(lh);
+	float ix = bx + 1 + AUD_PADX, iw = cw - 2 - AUD_PADX * 2;
+	float y1 = y + 1 + AUD_PADY, y2 = y1 + lh + AUD_ROWGAP;
+	static const char *const act[2] = {"save", "copy"};
+	static const int what[2] = {A_SAVE, A_FCOPY};
+	float aw[2], accw = 0;
+	char t[32];
+	float frac = 0, total = 0;
+	int st = audio_state(u->g, i, &frac);
+	int tn;
+
+	if (iw <= 0) return;
+	draw_rect(u->d, bx, y, cw, ch, c->line, 255, c->radius);
+	draw_rect(u->d, bx + 1, y + 1, cw - 2, ch - 2, c->bg, 40, c->radius - 1);
+
+	for (int k = 0; k < 2; k++) {
+		aw[k] = draw_measure(u->d, act[k], 4, DRAW_REGULAR);
+		accw += aw[k] + c->pad;
+	}
+	draw_cut(u, ix, y1, name, nn, iw - accw, c->dim);
+	float ax = ix + iw - accw + c->pad;
+	for (int k = 0; k < 2; k++) {
+		draw_text(u->d, ax, y1, act[k], 4, c->accent, DRAW_REGULAR);
+		hit(u, ax, y1, aw[k], lh, H_ACT, i, (size_t)what[k]);
+		ax += aw[k] + c->pad;
+	}
+
+	const char *lab = st == AUDIO_PLAYING ? "pause" : "play";
+	size_t ln = strlen(lab);
+	float pw = draw_measure(u->d, lab, ln, DRAW_REGULAR);
+	draw_text(u->d, ix, y2, lab, ln, c->accent, DRAW_REGULAR);
+	hit(u, ix, y2, pw, lh, H_AUDIO, i, 0);
+
+	if (st) total = audio_total();
+	if (total > 0)
+		tn = snprintf(t, sizeof t, "%d:%02d / %d:%02d", (int)(frac * total) / 60,
+		              (int)(frac * total) % 60, (int)total / 60, (int)total % 60);
+	else
+		tn = snprintf(t, sizeof t, "%d:%02d", 0, 0);
+	float tw = draw_measure(u->d, t, (size_t)tn, DRAW_REGULAR);
+	draw_text(u->d, ix + iw - tw, y2, t, (size_t)tn, c->dim, DRAW_REGULAR);
+
+	float trx = ix + pw + AUD_PADX, trw = iw - pw - tw - AUD_PADX * 2;
+	if (trw <= 0) return;
+	float ty = y2 + lh / 2 - 1.5f;
+	draw_rect(u->d, trx, ty, trw, 3, c->line, 200, 2);
+	if (st) draw_rect(u->d, trx, ty, trw * frac, 3, c->accent, 255, 2);
+	hit(u, trx, y2, trw, lh, H_AUDIO, i, 1);
 }
 
 static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, float bw)
@@ -499,11 +569,9 @@ static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, floa
 		float skip = 0;
 		if (i == u->newat) skip += lh + c->gap;
 		if (date) skip += lh + c->gap;
-		draw_rect2(u->d, x + MIDPAD - 4, y + skip, w - MIDPAD * 2 + 8, rh - skip,
-		           armed || at_me ? c->accent : c->sel,
-		           armed ? 26 : at_me ? (hov ? 34 : 18) : 40, 0, c->radius / 2);
-		if (armed || at_me)
-			draw_rect(u->d, x + MIDPAD - 4, y + skip, 2, rh - skip, c->accent, 255, 0);
+		draw_rect(u->d, x + MIDPAD - c->pad, y + skip, w - MIDPAD * 2 + c->pad * 2, rh - skip,
+		          armed || at_me ? c->accent : c->sel,
+		          armed ? 26 : at_me ? (hov ? 34 : 18) : 40, c->radius);
 	}
 	if (i == u->newat) {
 		draw_rule_label(u, x + MIDPAD, y, w - MIDPAD * 2, "new");
@@ -518,6 +586,7 @@ static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, floa
 		draw_rule_label(u, x + MIDPAD, y, w - MIDPAD * 2, day);
 		y += lh + c->gap;
 	}
+	y += ROWPAD;
 	if (hov) { u->strip_on = 1; u->strip_i = i; u->strip_x = x + w - MIDPAD; u->strip_y = y; }
 	if (head) {
 		char name[128], hhmm[8];
@@ -546,17 +615,18 @@ static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, floa
 	if (to != (size_t)-1) {                 /* one quoted line; clicking it jumps */
 		struct whimsy_msg q;
 		if (whimsy_msg(u->w, u->g, to, &q) == WHIMSY_OK) {
-			char lead[160];
-			size_t qn;
-			const char *qb = q.text;
-			qn = q.text_n;
-			char nm[WHIMSY_MAX_PET + 1];
+			char nm[WHIMSY_MAX_PET + 1], qt[128];
+			uint8_t qc[3];
+			size_t qn = q.text_n > sizeof qt ? sizeof qt : q.text_n;
 			whimsy_petname(u->w, q.sender, nm, sizeof nm);
-			int ln = snprintf(lead, sizeof lead, "\xe2\x94\x82 %s: %.*s", nm,
-			                  (int)(qn > 100 ? 100 : qn), qb);
-			if (ln >= (int)sizeof lead) ln = (int)sizeof lead - 1;
-			for (int k = 0; k < ln; k++) if (lead[k] == '\n') lead[k] = ' ';
-			draw_cut(u, bx, y, lead, (size_t)ln, bw, c->dim);
+			idcol(u, q.sender, qc);
+			memcpy(qt, q.text, qn);
+			for (size_t k = 0; k < qn; k++) if (qt[k] == '\n') qt[k] = ' ';
+			draw_rect(u->d, bx, y, 2, lh, qc, 255, 0);
+			float qx = draw_text(u->d, bx + 10, y, "\xe2\x86\xb0", 3, c->dim, DRAW_REGULAR);
+			qx = draw_text(u->d, qx + c->gap, y, nm, strlen(nm), qc, DRAW_REGULAR);
+			qx += c->gap;
+			draw_cut(u, qx, y, qt, qn, bx + bw - qx, c->dim);
 			hit(u, bx, y, bw, lh, H_GOTO, to, 0);
 		}
 		y += lh;
@@ -584,36 +654,25 @@ static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, floa
 	if (m.kind == WHIMSY_K_FILE) {
 		struct fbody f;
 		file_body(u, i, bw, &f);
-		float fx = draw_text(u->d, bx, y, f.info, strlen(f.info), c->dim, DRAW_REGULAR);
-		if (f.b) {
-			static const char *const act[2] = {"save", "copy"};
-			static const int what[2] = {A_SAVE, A_FCOPY};
-			for (int k = 0; k < 2; k++) {
-				float tw = draw_measure(u->d, act[k], 4, DRAW_REGULAR);
-				fx += c->pad;
-				draw_text(u->d, fx, y, act[k], 4, c->accent, DRAW_REGULAR);
-				hit(u, fx, y, tw, lh, H_ACT, i, (size_t)what[k]);
-				fx += tw;
-			}
-		}
-		y += lh;
 		if (f.aext) {
-			float frac = 0;
-			int st = audio_state(u->g, i, &frac);
-			const char *lab = st == AUDIO_PLAYING ? "pause" : "play";
-			size_t ln = strlen(lab);
-			float tw = draw_measure(u->d, lab, ln, DRAW_REGULAR);
-			float bx2 = bx + tw + c->pad, bwid = bw - tw - c->pad;
-			draw_text(u->d, bx, y, lab, ln, c->accent, DRAW_REGULAR);
-			hit(u, bx, y, tw, lh, H_AUDIO, i, 0);
-			if (bwid > 0) {
-				float by = y + lh / 2 - 2;
-				draw_rect(u->d, bx2, by, bwid, 4, c->line, 200, 2);
-				if (st) draw_rect(u->d, bx2, by, bwid * frac, 4, c->accent, 255, 2);
-				hit(u, bx2, y, bwid, lh, H_AUDIO, i, 1);
+			audio_card(u, i, bx, y, bw, m.text, m.text_n);
+			y += aud_h(lh) + c->gap;
+		} else {
+			float fx = draw_text(u->d, bx, y, f.info, strlen(f.info), c->dim, DRAW_REGULAR);
+			if (f.b) {
+				static const char *const act[2] = {"save", "copy"};
+				static const int what[2] = {A_SAVE, A_FCOPY};
+				for (int k = 0; k < 2; k++) {
+					float tw = draw_measure(u->d, act[k], 4, DRAW_REGULAR);
+					fx += c->pad;
+					draw_text(u->d, fx, y, act[k], 4, c->accent, DRAW_REGULAR);
+					hit(u, fx, y, tw, lh, H_ACT, i, (size_t)what[k]);
+					fx += tw;
+				}
 			}
-			y += lh + c->gap;
-		} else if (f.t) {
+			y += lh;
+		}
+		if (f.t) {
 			draw_image_at(u->d, f.t, bx, y, f.iw, f.ih);
 			hit(u, bx, y, f.iw, f.ih, H_ZOOM, i, OV_IMAGE);
 			y += f.ih + c->gap;

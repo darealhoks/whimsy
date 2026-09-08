@@ -16,6 +16,8 @@ int  audio_state(size_t g, size_t i, float *frac);
 const char *audio_toggle(size_t g, size_t i, const char *ext, const void *b, size_t n);
 /* "wav", "mp3" or "ogg" for a name we play, NULL otherwise */
 const char *audio_ext(const char *name, size_t n);
+/* seconds of what the player holds, 0 when nothing is loaded */
+float audio_total(void);
 void audio_seek(float frac);
 void audio_stop(void);
 

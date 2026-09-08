@@ -43,6 +43,7 @@ static struct {
 	uint8_t *pcm;
 	size_t n;                       /* decoded bytes */
 	int frame;                      /* bytes per sample frame */
+	int rate;
 	int sdlmem;                     /* pcm is SDL_LoadWAV_IO's, not malloc's */
 } A;
 
@@ -105,6 +106,7 @@ static const char *decode(const char *ext, const void *b, size_t n, SDL_AudioSpe
 	if (!A.n || spec->channels <= 0 || spec->freq <= 0) return "empty";
 	if (A.n > PCM_MAX) return "too long to play";
 	A.frame = spec->channels * 2;
+	A.rate = spec->freq;
 	return NULL;
 }
 
@@ -144,6 +146,12 @@ int audio_state(size_t g, size_t i, float *frac)
 		*frac = f < 0 ? 0 : f > 1 ? 1 : f;
 	}
 	return SDL_AudioStreamDevicePaused(A.st) ? AUDIO_PAUSED : AUDIO_PLAYING;
+}
+
+float audio_total(void)
+{
+	if (!A.loaded || !A.frame || !A.rate) return 0;
+	return (float)(A.n / (size_t)A.frame) / (float)A.rate;
 }
 
 void audio_seek(float frac)
