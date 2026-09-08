@@ -19,9 +19,9 @@ int  ui_event(struct ui *u, const SDL_Event *e, float scale);
 int  ui_tick(struct ui *u);
 void ui_paint(struct ui *u, float w, float h, float scale);
 
-/* what a command asked the shell for, cleared by the read. :quit and :server are the
- * only two things the main screen cannot do itself */
-enum { UI_NONE, UI_QUIT, UI_SERVER };
+/* what a command asked the shell for, cleared by the read. :quit, :server and :hide are the
+ * three things the main screen cannot do itself */
+enum { UI_NONE, UI_QUIT, UI_SERVER, UI_HIDE };
 int ui_action(struct ui *u);
 
 #endif

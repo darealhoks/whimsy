@@ -18,7 +18,7 @@
 #define SLOTS 1024              /* open-addressed, power of two, never grows */
 
 struct glyph {
-	uint32_t key;               /* cp << 2 | style, +1 so 0 is empty */
+	uint32_t key;               /* cp << 3 | style, +1 so 0 is empty */
 	float u, v, w, h;           /* atlas px */
 	float bx, by, adv;          /* bearing and advance, px */
 	int colour;                 /* rgba in the atlas: draw it unmodulated */
@@ -35,7 +35,13 @@ struct draw {
 	int pen_x, pen_y, row_h;
 	struct glyph slot[SLOTS];
 	float scale, lineh, ascent;
+	int replace;                /* writes its own alpha instead of blending onto the translucent window */
 };
+
+float draw_style_scale(int style)
+{
+	return style == DRAW_H1 ? 1.5f : style == DRAW_H2 ? 1.25f : 1;
+}
 
 static size_t step(const char *s, size_t n, uint32_t *cp)
 {
@@ -258,6 +264,12 @@ void draw_close(struct draw *d)
 	free(d);
 }
 
+int draw_has(struct draw *d, uint32_t cp)
+{
+	FT_Face f = d->face[DRAW_REGULAR];
+	return f && FT_Get_Char_Index(f, cp) != 0;
+}
+
 float draw_line_height(const struct draw *d) { return d->lineh; }
 float draw_ascent(const struct draw *d) { return d->ascent; }
 
@@ -322,7 +334,7 @@ static struct glyph *rasterize_colour(struct draw *d, uint32_t cp, int style, st
 	free(src);
 	free(dst);
 
-	g->key = (cp << 2 | (uint32_t)style) + 1;
+	g->key = (cp << 3 | (uint32_t)style) + 1;
 	g->u = (float)d->pen_x; g->v = (float)d->pen_y;
 	g->w = (float)w; g->h = (float)h;
 	g->bx = (float)f->glyph->bitmap_left * k;
@@ -335,26 +347,30 @@ static struct glyph *rasterize_colour(struct draw *d, uint32_t cp, int style, st
 
 static struct glyph *rasterize(struct draw *d, uint32_t cp, int style, struct glyph *g)
 {
-	FT_Face f = d->face[style] ? d->face[style] : d->face[DRAW_REGULAR];
-	int synth = !d->face[style];
+	int sty = style >= DRAW_H1 ? DRAW_BOLD : style;
+	float hs = draw_style_scale(style);
+	FT_Face f = d->face[sty] ? d->face[sty] : d->face[DRAW_REGULAR];
+	int synth = !d->face[sty];
 	if (!FT_Get_Char_Index(f, cp) && d->emoji && FT_Get_Char_Index(d->emoji, cp)) {
 		struct glyph *c = rasterize_colour(d, cp, style, g);
 		if (c) return c;
 		f = d->emoji;
 		synth = 0;
 	}
-	if (FT_Load_Char(f, cp, FT_LOAD_DEFAULT)) return NULL;
-	if (synth && style == DRAW_BOLD) FT_GlyphSlot_Embolden(f->glyph);
-	if (synth && style == DRAW_ITALIC) FT_GlyphSlot_Oblique(f->glyph);
-	if (FT_Render_Glyph(f->glyph, FT_RENDER_MODE_NORMAL)) return NULL;
+	if (hs != 1 && f != d->emoji) FT_Set_Pixel_Sizes(f, 0, (FT_UInt)lroundf((float)d->px * hs));
+	struct glyph *ret = NULL;
+	if (FT_Load_Char(f, cp, FT_LOAD_DEFAULT)) goto done;
+	if (synth && sty == DRAW_BOLD) FT_GlyphSlot_Embolden(f->glyph);
+	if (synth && sty == DRAW_ITALIC) FT_GlyphSlot_Oblique(f->glyph);
+	if (FT_Render_Glyph(f->glyph, FT_RENDER_MODE_NORMAL)) goto done;
 
 	FT_Bitmap *b = &f->glyph->bitmap;
-	if (b->pixel_mode != FT_PIXEL_MODE_GRAY && b->width && b->rows) return NULL;
-	if (place(d, (int)b->width, (int)b->rows)) return NULL;
+	if (b->pixel_mode != FT_PIXEL_MODE_GRAY && b->width && b->rows) goto done;
+	if (place(d, (int)b->width, (int)b->rows)) goto done;
 
 	if (b->width && b->rows) {
 		uint32_t *px = malloc((size_t)b->width * b->rows * 4);
-		if (!px) return NULL;
+		if (!px) goto done;
 		for (unsigned y = 0; y < b->rows; y++)
 			for (unsigned x = 0; x < b->width; x++)
 				px[y * b->width + x] = 0x00ffffffu | ((uint32_t)b->buffer[y * (unsigned)b->pitch + x] << 24);
@@ -363,7 +379,7 @@ static struct glyph *rasterize(struct draw *d, uint32_t cp, int style, struct gl
 		free(px);
 	}
 
-	g->key = (cp << 2 | (uint32_t)style) + 1;
+	g->key = (cp << 3 | (uint32_t)style) + 1;
 	g->u = (float)d->pen_x; g->v = (float)d->pen_y;
 	g->w = (float)b->width; g->h = (float)b->rows;
 	g->bx = (float)f->glyph->bitmap_left;
@@ -371,12 +387,15 @@ static struct glyph *rasterize(struct draw *d, uint32_t cp, int style, struct gl
 	g->adv = (float)(f->glyph->advance.x >> 6);
 
 	took(d, (int)b->width, (int)b->rows);
-	return g;
+	ret = g;
+done:
+	if (hs != 1 && f != d->emoji) FT_Set_Pixel_Sizes(f, 0, (FT_UInt)d->px);
+	return ret;
 }
 
 static struct glyph *glyph(struct draw *d, uint32_t cp, int style)
 {
-	uint32_t key = (cp << 2 | (uint32_t)style) + 1;
+	uint32_t key = (cp << 3 | (uint32_t)style) + 1;
 	size_t i = (key * 2654435761u) & (SLOTS - 1);
 	for (size_t n = 0; n < SLOTS; n++, i = (i + 1) & (SLOTS - 1)) {
 		if (d->slot[i].key == key) return &d->slot[i];
@@ -390,7 +409,7 @@ static float run(struct draw *d, float x, float y, const char *s, size_t n,
 {
 	if (paint) SDL_SetTextureAlphaMod(d->atlas, 255);
 	int modded = -1;
-	float px = x * d->scale, base = (y + d->ascent) * d->scale;
+	float px = x * d->scale, base = (y + d->ascent * draw_style_scale(style)) * d->scale;
 	for (size_t i = 0; i < n; ) {
 		uint32_t cp;
 		i += step(s + i, n - i, &cp);
@@ -435,7 +454,7 @@ float draw_text(struct draw *d, float x, float y, const char *s, size_t n,
 
 static void colour(struct draw *d, const uint8_t rgb[3], uint8_t a)
 {
-	SDL_SetRenderDrawBlendMode(d->r, SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawBlendMode(d->r, d->replace ? SDL_BLENDMODE_NONE : SDL_BLENDMODE_BLEND);
 	SDL_SetRenderDrawColor(d->r, rgb[0], rgb[1], rgb[2], a);
 }
 
@@ -466,6 +485,16 @@ static int arc(struct pt *p, float cx, float cy, float r, float a0, int steps)
 	return steps;
 }
 
+/* a corner of draw_rect2: an arc, or the square corner as one point. a zero radius arc
+ * would stack `steps` coincident points whose fringe quads fan out as visible spokes */
+static int corner(struct pt *p, float cx, float cy, float r, float a0, int steps)
+{
+	if (r >= 0.5f) return arc(p, cx, cy, r, a0, steps);
+	float a = a0 + (float)(M_PI / 4);
+	p[0] = (struct pt){cx, cy, cosf(a), sinf(a)};
+	return 1;
+}
+
 static void shape(struct draw *d, const struct pt *p, int n, const uint8_t rgb[3], uint8_t a)
 {
 	SDL_FColor c = {rgb[0] / 255.f, rgb[1] / 255.f, rgb[2] / 255.f, a / 255.f};
@@ -480,14 +509,28 @@ static void shape(struct draw *d, const struct pt *p, int n, const uint8_t rgb[3
 		v[m++] = (SDL_Vertex){{p[i].x - p[i].nx * 0.5f, p[i].y - p[i].ny * 0.5f}, c, {0, 0}};
 		v[m++] = (SDL_Vertex){{p[i].x + p[i].nx * 0.5f, p[i].y + p[i].ny * 0.5f}, c0, {0, 0}};
 	}
+	int fan = 0;
 	for (int i = 0; i < n; i++) {
 		int a1 = 1 + 2 * i, b1 = 1 + 2 * ((i + 1) % n);
 		idx[k++] = 0;  idx[k++] = a1;     idx[k++] = b1;
+	}
+	fan = k;
+	for (int i = 0; i < n; i++) {
+		int a1 = 1 + 2 * i, b1 = 1 + 2 * ((i + 1) % n);
 		idx[k++] = a1; idx[k++] = a1 + 1; idx[k++] = b1 + 1;
 		idx[k++] = a1; idx[k++] = b1 + 1; idx[k++] = b1;
 	}
+	if (!d->replace) {
+		SDL_SetRenderDrawBlendMode(d->r, SDL_BLENDMODE_BLEND);
+		SDL_RenderGeometry(d->r, NULL, v, m, idx, k);
+		return;
+	}
+	/* the fringe fades to alpha 0: replacing with it would punch a hole to the desktop,
+	 * so only the fill replaces and the edge still blends */
+	SDL_SetRenderDrawBlendMode(d->r, SDL_BLENDMODE_NONE);
+	SDL_RenderGeometry(d->r, NULL, v, m, idx, fan);
 	SDL_SetRenderDrawBlendMode(d->r, SDL_BLENDMODE_BLEND);
-	SDL_RenderGeometry(d->r, NULL, v, m, idx, k);
+	SDL_RenderGeometry(d->r, NULL, v, m, idx + fan, k - fan);
 }
 
 void draw_rect2(struct draw *d, float x, float y, float w, float h,
@@ -506,10 +549,10 @@ void draw_rect2(struct draw *d, float x, float y, float w, float h,
 	int sl = arcn(rl), sr = arcn(rr);
 	struct pt p[PT_MAX];
 	int n = 0;
-	n += arc(p + n, x + w - rr, y + h - rr, rr, 0, sr);
-	n += arc(p + n, x + rl,     y + h - rl, rl, (float)M_PI / 2, sl);
-	n += arc(p + n, x + rl,     y + rl,     rl, (float)M_PI, sl);
-	n += arc(p + n, x + w - rr, y + rr,     rr, (float)(3 * M_PI / 2), sr);
+	n += corner(p + n, x + w - rr, y + h - rr, rr, 0, sr);
+	n += corner(p + n, x + rl,     y + h - rl, rl, (float)M_PI / 2, sl);
+	n += corner(p + n, x + rl,     y + rl,     rl, (float)M_PI, sl);
+	n += corner(p + n, x + w - rr, y + rr,     rr, (float)(3 * M_PI / 2), sr);
 	shape(d, p, n, rgb, a);
 }
 
@@ -517,6 +560,15 @@ void draw_rect(struct draw *d, float x, float y, float w, float h,
                const uint8_t rgb[3], uint8_t a, float radius)
 {
 	draw_rect2(d, x, y, w, h, rgb, a, radius, radius);
+}
+
+/* a panel over the translucent window: without this its alpha stacks on the window's own */
+void draw_rect_over(struct draw *d, float x, float y, float w, float h,
+                    const uint8_t rgb[3], uint8_t a, float radius)
+{
+	d->replace = 1;
+	draw_rect2(d, x, y, w, h, rgb, a, radius, radius);
+	d->replace = 0;
 }
 
 void draw_rule(struct draw *d, float x, float y, float w, const uint8_t rgb[3])

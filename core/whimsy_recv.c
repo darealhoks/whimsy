@@ -45,6 +45,28 @@ size_t whimsy_first_unread(const struct whimsy *w, size_t g, uint16_t channel)
 	return nmsg;
 }
 
+void whimsy_mention(char out[WHIMSY_MENTION_LEN], const uint8_t pk[WHIMSY_PK])
+{
+	char fp[ID_FP_LEN];
+	identity_fingerprint(fp, pk);
+	out[0] = '@';
+	memcpy(out + 1, fp, WHIMSY_MENTION_LEN - 2);
+	out[WHIMSY_MENTION_LEN - 1] = 0;
+}
+
+/* our own token anywhere in the bytes; the sanitizer leaves ascii alone, so this reads
+ * the same on a raw payload as on the stored text */
+int names_us(const struct whimsy *w, const void *b, size_t n)
+{
+	char tok[WHIMSY_MENTION_LEN];
+	size_t tn = WHIMSY_MENTION_LEN - 1;
+	whimsy_mention(tok, w->id.pk);
+	if (n < tn) return 0;
+	for (size_t i = 0; i + tn <= n; i++)
+		if (!memcmp((const char *)b + i, tok, tn)) return 1;
+	return 0;
+}
+
 int whimsy_msg(const struct whimsy *w, size_t g, size_t i, struct whimsy_msg *m)
 {
 	if (g >= w->ng || i >= w->g[g]->nmsg) return WHIMSY_EARG;
@@ -64,6 +86,7 @@ int whimsy_msg(const struct whimsy *w, size_t g, size_t i, struct whimsy_msg *m)
 	m->text_n = n - (ext ? MSGEXT : MSGHDR);
 	m->mine = wc_equal(m->sender, w->id.pk, 32);
 	m->blocked = !m->mine && whimsy_blocked(w, m->sender);
+	m->mentions = !m->mine && names_us(w, m->text, m->text_n);
 	return WHIMSY_OK;
 }
 
@@ -286,13 +309,15 @@ static int ingest(struct whimsy *w, const uint8_t *b, size_t n)
 	}
 	/* the group signature bound this half to m.sender; a sender past the cap is a
 	 * peer we disagree with, not a blob to retry */
-	if (r > 0 && m.kind == WIRE_K_LINK && m.payload_n == WHIMSY_PK) {
-		int lr = save_link(w, m.sender, m.payload);
+	if (r > 0 && (m.kind == WIRE_K_LINK || m.kind == WIRE_K_UNLINK) &&
+	    m.payload_n == WHIMSY_PK) {
+		int lr = m.kind == WIRE_K_LINK ? save_link(w, m.sender, m.payload)
+		                               : drop_link(w, m.sender, m.payload);
 		if (lr == WHIMSY_ENOMEM || lr == WHIMSY_EIO) r = -1;
 	}
 	if (r > 0 && (m.kind == WIRE_K_TEXT || m.kind == WIRE_K_FILE) &&
 	    !wc_equal(m.sender, w->id.pk, WHIMSY_PK))
-		note_event(gr, m.channel);
+		note_event(gr, m.channel, names_us(w, m.payload, m.payload_n));
 	wc_wipe(w->scratch, sizeof w->scratch);
 	return r;
 }

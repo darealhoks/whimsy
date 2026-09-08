@@ -80,6 +80,16 @@ void idcol(struct ui *u, const uint8_t pk[WHIMSY_PK], uint8_t out[3])
 		for (int i = 0; i < 3; i++) out[i] = (uint8_t)(out[i] * 0.45);
 }
 
+/* unread messages in the channel that name us; the badge wears an '@' for them */
+static size_t chan_mentions(struct ui *u, size_t g, uint16_t id)
+{
+	size_t n = 0;
+	struct whimsy_msg m;
+	for (size_t i = whimsy_first_unread(u->w, g, id); i < whimsy_msg_count(u->w, g); i++)
+		if (!whimsy_msg(u->w, g, i, &m) && m.channel == id && m.mentions) n++;
+	return n;
+}
+
 static size_t group_unread(struct ui *u, size_t g)
 {
 	size_t n = 0;
@@ -92,6 +102,13 @@ void hit(struct ui *u, float x, float y, float w, float h, int kind, size_t a, s
 {
 	if (u->nhit >= (int)(sizeof u->hit / sizeof *u->hit)) return;
 	u->hit[u->nhit++] = (struct hit){x, y, w, h, kind, a, b};
+}
+
+void hit_top(struct ui *u, float x, float y, float w, float h, int kind, size_t a, size_t b)
+{
+	if (u->nhit >= (int)(sizeof u->hit / sizeof *u->hit)) return;
+	memmove(u->hit + 1, u->hit, (size_t)u->nhit++ * sizeof *u->hit);
+	u->hit[0] = (struct hit){x, y, w, h, kind, a, b};
 }
 
 /* ---- rows ---- */
@@ -203,10 +220,14 @@ static void sidebar(struct ui *u, float x, float y, float w, float h)
 				y += rh;
 			}
 			char name[128], badge[16];
-			size_t un = group_unread(u, g);
+			size_t un = group_unread(u, g), gm = 0;
+			int muted = whimsy_muted(u->w, g);
 			row_title(u, g, name, sizeof name);
 			if (!name[0]) snprintf(name, sizeof name, "group");
-			snprintf(badge, sizeof badge, "%zu", un);
+			for (size_t ch = 0; ch < whimsy_channel_count(u->w, g); ch++)
+				gm += chan_mentions(u, g, whimsy_channel_id(u->w, g, ch));
+			snprintf(badge, sizeof badge, "%s%zu", gm ? "@" : "", un);
+			if (muted) un = 0;      /* muted: not even how many are waiting */
 			uint8_t key[WHIMSY_PK] = {0};   /* a group id is 16 bytes; the hue is the first one */
 			memcpy(key, whimsy_group_id(u->w, g), WHIMSY_GID);
 			draw_row(u, x, y, w, is_dm(u, g) ? peer(u, g) : key, !is_dm(u, g),
@@ -219,8 +240,10 @@ static void sidebar(struct ui *u, float x, float y, float w, float h)
 				char cn[128], row[132];
 				whimsy_channel_name(u->w, g, ch, cn, sizeof cn);
 				snprintf(row, sizeof row, "#%s", cn);
-				size_t cu = whimsy_unread(u->w, g, whimsy_channel_id(u->w, g, ch));
-				snprintf(badge, sizeof badge, "%zu", cu);
+				uint16_t cid = whimsy_channel_id(u->w, g, ch);
+				size_t cu = whimsy_unread(u->w, g, cid);
+				snprintf(badge, sizeof badge, "%s%zu", chan_mentions(u, g, cid) ? "@" : "", cu);
+				if (muted) cu = 0;
 				draw_row(u, x, y, w, NULL, 0, row, cu ? badge : NULL, ch == u->chan ? 2 : 0, 30);
 				hit(u, x, y, w, rh, H_CHAN, g, ch);
 				y += rh;
@@ -269,6 +292,7 @@ void ui_paint(struct ui *u, float W, float H, float scale)
 	u->nhit = 0;
 	u->scale = scale;
 
+	if (u->cr_t) { crop_paint(u, W, H); return; }
 	if (u->set_open) { settings(u, W, H); return; }
 
 	if (!whimsy_group_count(u->w)) u->g = u->chan = 0;

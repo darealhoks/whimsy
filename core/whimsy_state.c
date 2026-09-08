@@ -474,6 +474,27 @@ int add_link(struct whimsy *w, const uint8_t who[WHIMSY_PK],
 	return WHIMSY_OK;
 }
 
+void del_link(struct whimsy *w, const uint8_t who[WHIMSY_PK],
+              const uint8_t other[WHIMSY_PK])
+{
+	for (size_t i = 0; i < w->nlnk; i++) {
+		if (!wc_equal(w->lnk[i].who, who, WHIMSY_PK) ||
+		    !wc_equal(w->lnk[i].other, other, WHIMSY_PK)) continue;
+		memmove(w->lnk + i, w->lnk + i + 1, (--w->nlnk - i) * sizeof *w->lnk);
+		return;
+	}
+}
+
+static int link_rec(struct whimsy *w, const uint8_t who[WHIMSY_PK],
+                    const uint8_t other[WHIMSY_PK], int on)
+{
+	uint8_t rec[2 * WHIMSY_PK + 1];
+	memcpy(rec, who, WHIMSY_PK);
+	memcpy(rec + WHIMSY_PK, other, WHIMSY_PK);
+	rec[2 * WHIMSY_PK] = (uint8_t)on;
+	return map_store(store_append(w->st, STORE_LINK, rec, sizeof rec));
+}
+
 /* add_link plus the store record behind it; a repeat is a no-op */
 int save_link(struct whimsy *w, const uint8_t who[WHIMSY_PK],
                      const uint8_t other[WHIMSY_PK])
@@ -481,12 +502,20 @@ int save_link(struct whimsy *w, const uint8_t who[WHIMSY_PK],
 	if (declared(w, who, other)) return WHIMSY_OK;
 	int e = add_link(w, who, other);
 	if (e) return e;
-	uint8_t rec[2 * WHIMSY_PK];
-	memcpy(rec, who, WHIMSY_PK);
-	memcpy(rec + WHIMSY_PK, other, WHIMSY_PK);
-	if ((e = map_store(store_append(w->st, STORE_LINK, rec, sizeof rec))))
+	if ((e = link_rec(w, who, other, 1)))
 		w->nlnk--;              /* the one add_link just appended */
 	return e;
+}
+
+/* del_link plus the store record behind it; a repeat is a no-op */
+int drop_link(struct whimsy *w, const uint8_t who[WHIMSY_PK],
+              const uint8_t other[WHIMSY_PK])
+{
+	if (!declared(w, who, other)) return WHIMSY_OK;
+	int e = link_rec(w, who, other, 0);
+	if (e) return e;
+	del_link(w, who, other);
+	return WHIMSY_OK;
 }
 
 /* out-of-band verification */
@@ -513,13 +542,38 @@ int whimsy_verified(const struct whimsy *w, const uint8_t pk[WHIMSY_PK])
 	return 0;
 }
 
+void del_ver(struct whimsy *w, const uint8_t pk[WHIMSY_PK])
+{
+	for (size_t i = 0; i < w->nver; i++) {
+		if (!wc_equal(w->ver[i], pk, WHIMSY_PK)) continue;
+		memmove(w->ver[i], w->ver[i + 1], (--w->nver - i) * WHIMSY_PK);
+		return;
+	}
+}
+
+int whimsy_unverify(struct whimsy *w, const uint8_t pk[WHIMSY_PK])
+{
+	if (!wc_pk_ok(pk)) return WHIMSY_EARG;
+	if (!whimsy_verified(w, pk)) return WHIMSY_OK;
+	uint8_t rec[WHIMSY_PK + 1];
+	memcpy(rec, pk, WHIMSY_PK);
+	rec[WHIMSY_PK] = 0;
+	int e = map_store(store_append(w->st, STORE_VERIFY, rec, sizeof rec));
+	if (e) return e;
+	del_ver(w, pk);
+	return WHIMSY_OK;
+}
+
 int whimsy_verify(struct whimsy *w, const uint8_t pk[WHIMSY_PK])
 {
 	if (!wc_pk_ok(pk)) return WHIMSY_EARG;
 	if (whimsy_verified(w, pk)) return WHIMSY_OK;
 	int e = add_ver(w, pk);
 	if (e) return e;
-	if ((e = map_store(store_append(w->st, STORE_VERIFY, pk, WHIMSY_PK)))) w->nver--;
+	uint8_t rec[WHIMSY_PK + 1];
+	memcpy(rec, pk, WHIMSY_PK);
+	rec[WHIMSY_PK] = 1;
+	if ((e = map_store(store_append(w->st, STORE_VERIFY, rec, sizeof rec)))) w->nver--;
 	if (e) return e;
 	e = push_avatars(w);            /* they are verified now, so our avatar may go */
 	return e == WHIMSY_ENET ? WHIMSY_OK : e;

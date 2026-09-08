@@ -3,6 +3,7 @@
 
 #include <SDL3/SDL.h>
 
+#include <ctype.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -66,6 +67,39 @@ static inline size_t field_fwd(const struct field *f)
 	return i > f->n ? f->n : i;
 }
 
+static inline int field_wordch(unsigned char c)
+{
+	return isalnum(c) || c == '_' || c >= 0x80;
+}
+
+static inline size_t field_word_back(const struct field *f)
+{
+	size_t i = f->cur;
+	while (i && !field_wordch((unsigned char)f->buf[i - 1])) i--;
+	while (i && field_wordch((unsigned char)f->buf[i - 1])) i--;
+	return i;
+}
+
+static inline size_t field_word_fwd(const struct field *f)
+{
+	size_t i = f->cur;
+	while (i < f->n && !field_wordch((unsigned char)f->buf[i])) i++;
+	while (i < f->n && field_wordch((unsigned char)f->buf[i])) i++;
+	return i;
+}
+
+/* the word under i, for a double click */
+static inline void field_word_at(struct field *f, size_t i)
+{
+	size_t a = i, b = i;
+	if (a && !field_wordch((unsigned char)f->buf[a]) && field_wordch((unsigned char)f->buf[a - 1])) a--, b--;
+	while (a && field_wordch((unsigned char)f->buf[a - 1])) a--;
+	while (b < f->n && field_wordch((unsigned char)f->buf[b])) b++;
+	if (a == b && b < f->n) b++;
+	f->anc = a;
+	f->cur = b;
+}
+
 static inline void field_copy(const struct field *f)
 {
 	size_t a, b;
@@ -95,14 +129,29 @@ static inline int field_key(struct field *f, SDL_Keycode k, SDL_Keymod mod, int 
 {
 	int ctrl = (mod & SDL_KMOD_CTRL) != 0, shift = (mod & SDL_KMOD_SHIFT) != 0;
 	if (ctrl) {
+		size_t cur;
 		switch (k) {
 		case SDLK_V: field_paste(f, one_line); return 1;
 		case SDLK_C: field_copy(f); return 1;
 		case SDLK_X: field_copy(f); field_cut_sel(f); return 1;
 		case SDLK_A: f->anc = 0; f->cur = f->n; return 1;
 		case SDLK_U: field_erase(f, 0, f->n); return 1;
+		case SDLK_W: field_erase(f, field_word_back(f), f->cur); return 1;
+		case SDLK_BACKSPACE:
+			if (f->cur != f->anc) field_cut_sel(f);
+			else field_erase(f, field_word_back(f), f->cur);
+			return 1;
+		case SDLK_DELETE:
+			if (f->cur != f->anc) field_cut_sel(f);
+			else field_erase(f, f->cur, field_word_fwd(f));
+			return 1;
+		case SDLK_LEFT:  cur = field_word_back(f); break;
+		case SDLK_RIGHT: cur = field_word_fwd(f); break;
+		default: return 0;
 		}
-		return 0;
+		f->cur = cur;
+		if (!shift) f->anc = cur;
+		return 1;
 	}
 	size_t cur = f->cur;
 	switch (k) {
@@ -114,8 +163,14 @@ static inline int field_key(struct field *f, SDL_Keycode k, SDL_Keymod mod, int 
 		if (f->cur != f->anc) field_cut_sel(f);
 		else field_erase(f, f->cur, field_fwd(f));
 		return 1;
-	case SDLK_LEFT:  cur = field_back(f); break;
-	case SDLK_RIGHT: cur = field_fwd(f); break;
+	case SDLK_LEFT:
+		if (!shift && f->cur != f->anc) { size_t a, b; field_sel(f, &a, &b); cur = a; }
+		else cur = field_back(f);
+		break;
+	case SDLK_RIGHT:
+		if (!shift && f->cur != f->anc) { size_t a, b; field_sel(f, &a, &b); cur = b; }
+		else cur = field_fwd(f);
+		break;
 	case SDLK_HOME:  cur = 0; break;
 	case SDLK_END:   cur = f->n; break;
 	default: return 0;

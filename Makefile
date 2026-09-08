@@ -19,7 +19,7 @@ GUI_PKGS := sdl3 freetype2
 HAVE_GUI := $(shell pkg-config --exists $(GUI_PKGS) && echo 1)
 GUI_CFLAGS := $(shell pkg-config --cflags $(GUI_PKGS) 2>/dev/null)
 GUI_LIBS := $(shell pkg-config --libs $(GUI_PKGS) 2>/dev/null)
-GUI_INC := -Igui -Ivendor/stb
+GUI_INC := -Igui -Ivendor/stb -Ivendor/dr
 GUI_HDRS := $(notdir $(wildcard gui/*.h) $(wildcard gui/*.c))
 
 all: $(BIN)/libwhimsy.a $(if $(wildcard server/*.c),$(BIN)/whimsyd) $(if $(HAVE_GUI),$(BIN)/whimsy)

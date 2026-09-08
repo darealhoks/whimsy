@@ -88,6 +88,32 @@ void clip_set(const char *s, size_t n)
 	SDL_free(t);
 }
 
+/* the four levels, in the order the popup and the settings row cycle them */
+static const struct { const char *name; int lv; } NOTIFY[4] = {
+	{"all", WHIMSY_N_ALL}, {"mentions", WHIMSY_N_MENTION},
+	{"none", WHIMSY_N_NONE}, {"mute", WHIMSY_N_MUTE}
+};
+
+const char *notify_name(int lv)
+{
+	for (int i = 0; i < 4; i++) if (NOTIFY[i].lv == lv) return NOTIFY[i].name;
+	return "all";
+}
+
+/* the level after lv in that order, so one click walks all four */
+int notify_next(int lv)
+{
+	for (int i = 0; i < 4; i++) if (NOTIFY[i].lv == lv) return NOTIFY[(i + 1) % 4].lv;
+	return WHIMSY_N_ALL;
+}
+
+static int notify_parse(const char *s, size_t n)
+{
+	for (int i = 0; i < 4; i++)
+		if (strlen(NOTIFY[i].name) == n && !memcmp(NOTIFY[i].name, s, n)) return NOTIFY[i].lv;
+	return -1;
+}
+
 int yes(const char *s) { return s[0] == 'y' || s[0] == 'Y'; }
 
 /* the newest message in the channel, or (size_t)-1. phase 4 puts a selection here */
@@ -200,24 +226,6 @@ void clip_bytes(struct ui *u, const void *b, size_t n, const char *mime)
 	u->clipn = n;
 }
 
-#define AVATAR_PX 64            /* .map/gui.md: avatars are 64 px, at most 8k */
-
-/* the picked picture cropped square, resized and encoded here: core never parses an
- * image, it carries the bytes a frontend hands it */
-static int set_avatar(struct ui *u, const char *path, int group)
-{
-	size_t n, out_n;
-	void *src = SDL_LoadFile(path, &n), *out;
-	if (!src) { ui_err(u, "%s", SDL_GetError()); return 0; }
-	int e = img_avatar(src, n, AVATAR_PX, WHIMSY_MAX_AVATAR, &out, &out_n);
-	SDL_free(src);
-	if (e) { ui_err(u, "that image will not re-encode"); return 0; }
-	e = group ? whimsy_group_avatar_set(u->w, u->g, out, out_n)
-	          : whimsy_avatar_set(u->w, out, out_n);
-	free(out);
-	return done(u, e);
-}
-
 /* re-encode over-cap image bytes and send what comes out under the same name */
 static int send_shrunk(struct ui *u, const char *path)
 {
@@ -249,7 +257,7 @@ static int send_path(struct ui *u, const char *path)
 	if (SDL_GetPathInfo(path, &st) && st.size > WHIMSY_MAX_FILE) {
 		file_human((size_t)st.size, big, sizeof big);
 		file_human(WHIMSY_MAX_FILE, cap, sizeof cap);
-		if (!mime_of(path)) { ui_err(u, "%s is %s, the cap is %s", path, big, cap); return 0; }
+		if (!img_mime(path)) { ui_err(u, "%s is %s, the cap is %s", path, big, cap); return 0; }
 		if (!u->nans) return ask(u, 0, "image is %s, shrink to fit? [y/N]", big);
 		if (!yes(u->ans[0])) return 0;
 		return send_shrunk(u, path);
@@ -262,11 +270,12 @@ static void picked(void *ud, const char *const *list, int filter)
 {
 	struct ui *u = ud;
 	char line[512];
-	int save = u->dialog == 2;
+	static const char *const cmd[] = {"file", "file", "save", "avatar", "grp a"};
 	(void)filter;
+	unsigned which = (unsigned)u->dialog;
 	u->dialog = 0;
-	if (!list || !list[0]) return;
-	snprintf(line, sizeof line, "%s %s", save ? "save" : "file", list[0]);
+	if (!list || !list[0] || which >= sizeof cmd / sizeof *cmd) return;
+	snprintf(line, sizeof line, "%s %s", cmd[which], list[0]);
 	run_cmd(u, line);
 }
 
@@ -276,6 +285,28 @@ static void pick(struct ui *u, int which)
 	u->dialog = which;
 	if (which == 2) SDL_ShowSaveFileDialog(picked, u, win, NULL, 0, NULL);
 	else SDL_ShowOpenFileDialog(picked, u, win, NULL, 0, NULL, false);
+}
+
+/* :go and ctrl+k: an exact name wins, else the first prefix, channels here before groups */
+static int go_to(struct ui *u, const char *name)
+{
+	char t[128];
+	size_t n = strlen(name), pc = (size_t)-1, pg = (size_t)-1;
+	if (!n) { ui_err(u, "jump where"); return 0; }
+	for (size_t i = 0; i < whimsy_channel_count(u->w, u->g); i++) {
+		whimsy_channel_name(u->w, u->g, i, t, sizeof t);
+		if (!strcmp(t, name)) { select_group(u, u->g, i); return 0; }
+		if (pc == (size_t)-1 && !strncmp(t, name, n)) pc = i;
+	}
+	for (size_t g = 0; g < whimsy_group_count(u->w); g++) {
+		row_title(u, g, t, sizeof t);
+		if (!strcmp(t, name)) { select_group(u, g, 0); return 0; }
+		if (pg == (size_t)-1 && !strncmp(t, name, n)) pg = g;
+	}
+	if (pc != (size_t)-1) select_group(u, u->g, pc);
+	else if (pg != (size_t)-1) select_group(u, pg, 0);
+	else ui_err(u, "no channel, group or dm like that");
+	return 0;
 }
 
 /* 1 when the line is waiting on an answer. line is what was typed after the ':' */
@@ -296,7 +327,7 @@ int exec(struct ui *u, const char *line)
 	size_t i;
 	int e;
 
-	if (!strcmp(c->name, "group")) {
+	if (!strcmp(c->name, "grp")) {
 		if (sub == 'n') {
 			const char *chans[] = {"general"};
 			if (!*rest2) { ui_err(u, "give the group a name"); return 0; }
@@ -306,14 +337,21 @@ int exec(struct ui *u, const char *line)
 		}
 		if (sub == 'r') return done(u, whimsy_group_rename(u->w, u->g, rest2));
 		if (sub == 'a') {
-			if (!*rest2) return done(u, whimsy_group_avatar_set(u->w, u->g, NULL, 0));
-			return set_avatar(u, rest2, 1);
+			if (!whimsy_is_owner(u->w, u->g)) { ui_err(u, "owner only"); return 0; }
+			if (!*rest2) { pick(u, 4); return 0; }
+			if (!strcmp(rest2, "off"))
+				return done(u, whimsy_group_avatar_set(u->w, u->g, NULL, 0));
+			crop_open(u, rest2, 1);
+			return 0;
 		}
 		if (sub == 'd') {
 			char name[128];
+			int own = whimsy_is_owner(u->w, u->g);
 			row_title(u, u->g, name, sizeof name);
-			if (!u->nans) return ask(u, 0, "leave %s? everything local goes with it [y/N]",
-			                         name[0] ? name : "this group");
+			if (!u->nans)
+				return ask(u, 0, own ? "delete %s? every member loses it [y/N]"
+				                     : "leave %s? everything local goes with it [y/N]",
+				           name[0] ? name : "this group");
 			if (!yes(u->ans[0])) return 0;
 			if ((e = whimsy_group_leave(u->w, u->g))) return done(u, e);
 			/* leaving shifts every index above u->g: no tex slot's .g still names its group */
@@ -346,7 +384,7 @@ int exec(struct ui *u, const char *line)
 	}
 	if (!strcmp(c->name, "add") || !strcmp(c->name, "kick") || !strcmp(c->name, "dm") ||
 	    !strcmp(c->name, "block") ||
-	    !strcmp(c->name, "link") || !strcmp(c->name, "pet") ||
+	    !strcmp(c->name, "link") || !strcmp(c->name, "unlink") || !strcmp(c->name, "pet") ||
 	    (!strcmp(c->name, "verify") && l.nw > 1)) {
 		if (!n1 || !resolve(u, a1, n1, pk)) { ui_err(u, "no key or petname like that"); return 0; }
 		if (!strcmp(c->name, "block")) {
@@ -359,6 +397,7 @@ int exec(struct ui *u, const char *line)
 		}
 		if (!strcmp(c->name, "add"))    return done(u, whimsy_group_add(u->w, u->g, pk));
 		if (!strcmp(c->name, "link"))   return done(u, whimsy_link(u->w, pk));
+		if (!strcmp(c->name, "unlink")) return done(u, whimsy_unlink(u->w, pk));
 		if (!strcmp(c->name, "verify")) return done(u, whimsy_verify(u->w, pk));
 		if (!strcmp(c->name, "pet"))    return done(u, whimsy_set_petname(u->w, pk, rest2));
 		if (!strcmp(c->name, "kick")) {
@@ -410,10 +449,12 @@ int exec(struct ui *u, const char *line)
 		invalidate(u);
 		return 0;
 	}
-	if (!strcmp(c->name, "mute")) {
-		int on = !whimsy_muted(u->w, u->g);
-		if ((e = whimsy_mute(u->w, u->g, on))) return done(u, e);
-		ui_err(u, on ? "muted" : "unmuted");
+	if (!strcmp(c->name, "notify")) {
+		int lv = notify_parse(a1, n1);
+		if (!n1) { ui_err(u, "notify is %s here", notify_name(whimsy_notify_level(u->w, u->g))); return 0; }
+		if (lv < 0) { ui_err(u, "all, mentions, none or mute"); return 0; }
+		if ((e = whimsy_notify(u->w, u->g, lv))) return done(u, e);
+		ui_err(u, "notify %s", notify_name(lv));
 		return 0;
 	}
 	if (!strcmp(c->name, "set")) {
@@ -448,8 +489,10 @@ int exec(struct ui *u, const char *line)
 		return send_path(u, rest1);
 	}
 	if (!strcmp(c->name, "avatar")) {
-		if (!*rest1) return done(u, whimsy_avatar_set(u->w, NULL, 0));
-		return set_avatar(u, rest1, 0);
+		if (!*rest1) { pick(u, 3); return 0; }
+		if (!strcmp(rest1, "off")) return done(u, whimsy_avatar_set(u->w, NULL, 0));
+		crop_open(u, rest1, 0);
+		return 0;
 	}
 	if (!strcmp(c->name, "nuke")) {
 		if (!u->nans) {
@@ -466,8 +509,10 @@ int exec(struct ui *u, const char *line)
 		select_group(u, 0, 0);
 		return done(u, e);
 	}
+	if (!strcmp(c->name, "go"))     return go_to(u, rest1);
 	if (!strcmp(c->name, "server")) { u->action = UI_SERVER; return 0; }
 	if (!strcmp(c->name, "quit"))   { u->action = UI_QUIT; return 0; }
+	if (!strcmp(c->name, "hide"))   { u->action = UI_HIDE; return 0; }
 
 	/* what is left names a message: the one a click named, else the newest */
 	i = target(u);
@@ -490,6 +535,7 @@ void run_line(struct ui *u)
 			snprintf(u->ans[u->nans++], sizeof u->ans[0], "%s", u->comp.buf);
 		u->ask[0] = 0;
 	} else {
+		if (u->comp.buf[0] == ':' && u->pop_sel > 0) complete(u);   /* enter takes the highlight */
 		snprintf(u->pend, sizeof u->pend, "%s", u->comp.buf + 1);
 		u->nans = 0;
 	}
@@ -516,10 +562,10 @@ static int candidates(struct ui *u, const struct cmd_line *l, int wi,
 	if (t == CA_SUB) {
 		static const char *const sub[] = {"n", "r", "d", "a"};
 		static const char *const what[] = {"new", "rename", "delete", "avatar"};
-		int leave = !strcmp(c->name, "group");
-		for (; n < (leave ? 4 : 3) && n < cap; n++) {
+		int grp = !strcmp(c->name, "grp");
+		for (; n < (grp ? 4 : 3) && n < cap; n++) {
 			cand[n] = sub[n];
-			help[n] = n == 2 && leave ? "leave" : what[n];
+			help[n] = n == 2 && grp && !whimsy_is_owner(u->w, u->g) ? "leave" : what[n];
 		}
 		return n;
 	}
@@ -541,6 +587,20 @@ static int candidates(struct ui *u, const struct cmd_line *l, int wi,
 			whimsy_petname(u->w, whimsy_member(u->w, u->g, i), buf[n], 64);
 			cand[n] = buf[n];
 		}
+	if (t == CA_GOTO) {
+		for (size_t i = 0; i < whimsy_channel_count(u->w, u->g) && n < cap; i++, n++) {
+			whimsy_channel_name(u->w, u->g, i, buf[n], 64);
+			cand[n] = buf[n];
+		}
+		for (size_t i = 0; i < whimsy_group_count(u->w) && n < cap; i++) {
+			row_title(u, i, buf[n], 64);
+			if (!buf[n][0]) continue;
+			cand[n] = buf[n];
+			n++;
+		}
+	}
+	if (t == CA_NOTIFY)
+		for (int i = 0; i < 4 && n < cap; i++, n++) cand[n] = NOTIFY[i].name;
 	if (t == CA_KEY) {
 		for (int i = 0; conf_keys[i] && n < cap; i++) cand[n++] = conf_keys[i];
 		for (int k = 0; whimsy_key_name(k) && n < cap; k++) cand[n++] = whimsy_key_name(k);
@@ -569,13 +629,72 @@ int arg_list(struct ui *u, char buf[][64], const char *cand[], const char *help[
 	return k;
 }
 
+/* the '@word' the caret sits in, and the members whose petname it prefixes. -1 when
+ * the caret is not in a mention */
+int ment_list(struct ui *u, char buf[][64], const char *cand[], const char **word, size_t *wn)
+{
+	size_t cur = u->comp.cur, at;
+	if (!cur || u->ask[0] || u->comp.buf[0] == ':' || u->comp.buf[0] == '/') return -1;
+	at = cur;
+	while (at && u->comp.buf[at - 1] != ' ' && u->comp.buf[at - 1] != '\n') at--;
+	if (u->comp.buf[at] != '@') return -1;
+	*word = u->comp.buf + at + 1;
+	*wn = cur - at - 1;
+	int n = 0;
+	for (size_t i = 0; i < whimsy_member_count(u->w, u->g) && n < 32; i++) {
+		const uint8_t *pk = whimsy_member(u->w, u->g, i);
+		if (!memcmp(pk, u->self, WHIMSY_PK)) continue;
+		whimsy_petname(u->w, pk, buf[n], 64);
+		if (strlen(buf[n]) < *wn || memcmp(buf[n], *word, *wn)) continue;
+		cand[n] = buf[n];
+		n++;
+	}
+	return n;
+}
+
+/* 1 while the mention popup stands: tab and the arrows belong to it */
+int ment_open(struct ui *u)
+{
+	char buf[32][64];
+	const char *cand[32], *word;
+	size_t wn;
+	return ment_list(u, buf, cand, &word, &wn) > 0;
+}
+
+/* the token for the nth candidate the last ment_list produced */
+static void ment_apply(struct ui *u, const char *name)
+{
+	char tok[WHIMSY_MENTION_LEN + 1] = {0};
+	size_t cur = u->comp.cur, at = cur;
+	for (size_t i = 0; i < whimsy_member_count(u->w, u->g); i++) {
+		const uint8_t *pk = whimsy_member(u->w, u->g, i);
+		char pn[WHIMSY_MAX_PET + 1];
+		whimsy_petname(u->w, pk, pn, sizeof pn);
+		if (strcmp(pn, name)) continue;
+		whimsy_mention(tok, pk);
+		break;
+	}
+	if (!tok[0]) return;
+	strcat(tok, " ");
+	while (at && u->comp.buf[at - 1] != ' ' && u->comp.buf[at - 1] != '\n') at--;
+	if (at + strlen(tok) >= FIELD_MAX) return;
+	memmove(u->comp.buf + at + strlen(tok), u->comp.buf + cur, u->comp.n - cur);
+	memcpy(u->comp.buf + at, tok, strlen(tok));
+	u->comp.n = u->comp.n - (cur - at) + strlen(tok);
+	u->comp.buf[u->comp.n] = 0;
+	u->comp.cur = u->comp.anc = at + strlen(tok);
+	u->pop_sel = 0;
+}
+
 /* tab: the command name, or the argument the caret is in */
 void complete(struct ui *u)
 {
 	char buf[32][64], out[64];
 	const char *cand[32], *help[32], *word = "";
 	size_t wn = 0;
-	int n = arg_list(u, buf, cand, help, 32, &word, &wn);
+	int n = ment_list(u, buf, cand, &word, &wn);
+	if (n > 0) { ment_apply(u, cand[u->pop_sel < n ? u->pop_sel : n - 1]); return; }
+	n = arg_list(u, buf, cand, help, 32, &word, &wn);
 
 	if (n < 0) {                    /* the command word: the popup's own highlight */
 		struct cmd_line l;

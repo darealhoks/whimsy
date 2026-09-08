@@ -270,7 +270,7 @@ int erase_grp(struct whimsy *w, const uint8_t gid[WHIMSY_GID], const struct grp 
 			hit = n >= WHIMSY_PK && pk_gone(w, skip, p);
 			break;
 		case STORE_LINK:
-			hit = n == 2 * WHIMSY_PK && pk_gone(w, skip, p) &&
+			hit = n >= 2 * WHIMSY_PK && pk_gone(w, skip, p) &&
 			      pk_gone(w, skip, p + WHIMSY_PK);
 			break;
 		default:
@@ -415,6 +415,20 @@ int whimsy_link(struct whimsy *w, const uint8_t pk[WHIMSY_PK])
 	int fail = WHIMSY_OK;
 	for (size_t g = 0; g < w->ng; g++) {
 		int r = publish_links(w, w->g[g]);
+		if (r) fail = r;
+	}
+	return fail;
+}
+
+int whimsy_unlink(struct whimsy *w, const uint8_t pk[WHIMSY_PK])
+{
+	if (!wc_pk_ok(pk)) return WHIMSY_EARG;
+	if (!declared(w, w->id.pk, pk)) return WHIMSY_OK;
+	int e = drop_link(w, w->id.pk, pk);
+	if (e) return e;
+	int fail = WHIMSY_OK;
+	for (size_t g = 0; g < w->ng; g++) {
+		int r = revoke_link(w, w->g[g], pk);
 		if (r) fail = r;
 	}
 	return fail;

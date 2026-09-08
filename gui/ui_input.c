@@ -1,5 +1,7 @@
 #include "ui_int.h"
 
+#include "audio.h"
+
 #include <stdlib.h>
 
 #include "file.h"
@@ -138,6 +140,15 @@ static void take_hit(struct ui *u, const struct hit *h)
 	case H_SDRAG: case H_MDRAG: u->drag = h->kind; break;
 	case H_GOTO:  scroll_to(u, h->a); break;
 	case H_UNARM: cancel(u); break;
+	case H_COMP: {
+		size_t i = comp_at(u, u->mx, u->my);
+		u->blink = SDL_GetTicks();
+		if (u->clicks >= 3) { u->comp.anc = 0; u->comp.cur = u->comp.n; break; }
+		if (u->clicks == 2) { field_word_at(&u->comp, i); break; }
+		u->comp.cur = u->comp.anc = i;
+		u->drag = H_COMP;
+		break;
+	}
 	case H_NEWPILL: u->scroll = 0; u->newat = (size_t)-1; invalidate(u); break;
 	case H_ACT:
 		u->act_i = h->a;
@@ -162,6 +173,21 @@ static void take_hit(struct ui *u, const struct hit *h)
 			ui_err(u, "copied to clipboard");
 		}
 		break;
+	case H_AUDIO: {
+		size_t n;
+		const uint8_t *b;
+		const char *ext, *err;
+		u->act_i = h->a;
+		if (whimsy_msg(u->w, u->g, h->a, &m) != WHIMSY_OK) break;
+		if (h->b && audio_state(u->g, h->a, NULL)) {
+			audio_seek(h->w > 0 ? (u->mx - h->x) / h->w : 0);
+			break;
+		}
+		if (!(b = whimsy_file_open(u->w, u->g, h->a, &n))) { ui_err(u, "no longer held"); break; }
+		if (!(ext = audio_ext(m.text, m.text_n))) break;
+		if ((err = audio_toggle(u->g, h->a, ext, b, n))) ui_err(u, "%s", err);
+		break;
+	}
 	case H_ZOOM:
 		u->act_i = h->a;
 		u->over = (int)h->b;
@@ -208,8 +234,10 @@ static void take_hit(struct ui *u, const struct hit *h)
 		break;
 	case H_CBTN:
 		memcpy(pk, u->card_pk, WHIMSY_PK);
-		if (h->b == 0) done(u, whimsy_verify(u->w, pk));
-		else { u->card = 0; open_dm(u, pk); }
+		if (h->a == 0) done(u, whimsy_verified(u->w, pk) ? whimsy_unverify(u->w, pk)
+		                                                 : whimsy_verify(u->w, pk));
+		else if (h->a == 1) { u->card = 0; open_dm(u, pk); }
+		else done(u, whimsy_block(u->w, pk, !whimsy_blocked(u->w, pk)));
 		break;
 	case H_CARD: break;
 	case H_SCAT:
@@ -218,10 +246,18 @@ static void take_hit(struct ui *u, const struct hit *h)
 		u->set_scroll = 0;
 		return;
 	case H_SROW:
-		if (set_kind((int)h->a) == S_BOOL) {
+		if (set_kind((int)h->a) == S_CYCLE) {
+			int lv = whimsy_notify_level(u->w, u->g);
+			done(u, whimsy_notify(u->w, u->g, notify_next(lv)));
+		} else if (set_kind((int)h->a) == S_BOOL) {
 			u->set_row = (int)h->a;
 			set_apply(u, set_on(u, (int)h->a) ? "0" : "1");
 		} else set_edit(u, (int)h->a);
+		break;
+	case H_SLOT:
+		u->set_row = (int)h->a;
+		u->set_slot = (int)h->b;
+		u->set_nfont = 0;
 		break;
 	case H_SFONT:
 		if ((int)h->a < u->set_nfont) set_apply(u, u->set_font[h->a]);
@@ -234,17 +270,38 @@ static int on_top(int kind)
 {
 	return kind == H_ACT || kind == H_RCT || kind == H_PILL || kind == H_GOTO ||
 	       kind == H_PROF || kind == H_NEWPILL || kind == H_ZOOM ||
-	       kind == H_LINK || kind == H_SPOIL;
+	       kind == H_LINK || kind == H_SPOIL || kind == H_AUDIO;
+}
+
+/* a user bind wins over the hardcoded keys; an empty command means the config unbound
+   the key, so it does nothing at all. 0 leaves the key to the handling below */
+static int try_bind(struct ui *u, SDL_Keycode k, SDL_Keymod m)
+{
+	char spec[80], key[24];
+	const char *name = SDL_GetKeyName(k), *cmd;
+	char *q;
+
+	if (!u->c || !u->c->nbind || !name || !*name) return 0;
+	snprintf(spec, sizeof spec, "%s%s%s%s", (m & SDL_KMOD_CTRL) ? "ctrl+" : "",
+	         (m & SDL_KMOD_ALT) ? "alt+" : "", (m & SDL_KMOD_SHIFT) ? "shift+" : "", name);
+	while ((q = strchr(spec, ' '))) memmove(q, q + 1, strlen(q));
+	if (!conf_keyspec(spec, key, sizeof key)) return 0;
+	if (!(cmd = conf_bind(u->c, key))) return 0;
+	if (*cmd) run_cmd(u, cmd);
+	return 1;
 }
 
 int ui_event(struct ui *u, const SDL_Event *e, float scale)
 {
+	if (u->cr_t) return crop_event(u, e, scale);
 	switch (e->type) {
 	case SDL_EVENT_TEXT_INPUT: {
 		char first = e->text.text[0];
 		u->err[0] = 0;
+		u->blink = SDL_GetTicks();
 		if (u->set_open) {
-			if (u->set_row >= 0) { field_insert(&u->set_f, e->text.text); set_suggest(u); }
+			if (u->set_row >= 0 && set_kind(u->set_row) == S_EMOJI) set_slot_put(u, e->text.text);
+		else if (u->set_row >= 0) { field_insert(&u->set_f, e->text.text); set_suggest(u); }
 			return 1;
 		}
 		if (u->mode == M_DEL) { del_answer(u, first | 0x20); return 1; }
@@ -281,12 +338,17 @@ int ui_event(struct ui *u, const SDL_Event *e, float scale)
 	case SDL_EVENT_MOUSE_BUTTON_DOWN: {
 		float k = SDL_GetWindowPixelDensity(SDL_GetRenderWindow(u->r)) / scale;
 		float mx = e->button.x * k, my = e->button.y * k;
+		u->mx = mx;
+		u->my = my;
+		u->clicks = e->button.clicks;
 		u->err[0] = 0;
+		u->lsel = 0;
 		if (u->over) { u->over = OV_NONE; return 1; }
 		if (u->set_open) {
 			for (int i = 0; i < u->nhit; i++) {
 				struct hit *h = &u->hit[i];
-				if (h->kind != H_SROW && h->kind != H_SFONT && h->kind != H_SCAT) continue;
+				if (h->kind != H_SROW && h->kind != H_SFONT && h->kind != H_SCAT &&
+				    h->kind != H_SLOT) continue;
 				if (mx < h->x || mx >= h->x + h->w || my < h->y || my >= h->y + h->h) continue;
 				take_hit(u, h);
 				return 1;
@@ -298,13 +360,21 @@ int ui_event(struct ui *u, const SDL_Event *e, float scale)
 		for (int pass = u->card ? 0 : 1; pass < 3; pass++) {
 			for (int i = 0; i < u->nhit; i++) {
 				struct hit *h = &u->hit[i];
-				if (pass == 0 && h->kind != H_CARD && h->kind != H_CBTN) continue;
-				if (pass == 1 && !on_top(h->kind)) continue;
+				if (pass == 0 && h->kind != H_CBTN) continue;   /* buttons first: H_CARD lies under them */
+				if (pass == 1 && u->card && h->kind != H_CARD) continue;
+				if (pass == 1 && !u->card && !on_top(h->kind)) continue;
 				if (mx < h->x || mx >= h->x + h->w || my < h->y || my >= h->y + h->h) continue;
 				take_hit(u, h);
 				return 1;
 			}
-			if (pass == 0) { u->card = 0; return 1; }   /* a click outside closes the card */
+			if (u->card && pass == 1) { u->card = 0; return 1; }   /* a click outside closes the card */
+		}
+		if (my >= u->log_y && my < u->log_y + u->log_h) {       /* bare log text: drag to select */
+			log_sel_at(u, mx, my, &u->sa_row, &u->sa_off);
+			u->sb_row = u->sa_row;
+			u->sb_off = u->sa_off;
+			u->lsel = u->sa_row != (size_t)-1;
+			u->drag = H_SEL;
 		}
 		return 1;
 	}
@@ -316,6 +386,7 @@ int ui_event(struct ui *u, const SDL_Event *e, float scale)
 		return 1;
 	}
 	case SDL_EVENT_MOUSE_BUTTON_UP:
+		if (u->drag == H_COMP || u->drag == H_SEL) { u->drag = 0; return 1; }
 		if (u->drag == H_SDRAG) remember(u, "side_w", u->side_w);
 		else if (u->drag == H_MDRAG) remember(u, "memb_w", u->memb_w);
 		u->drag = 0;
@@ -326,6 +397,8 @@ int ui_event(struct ui *u, const SDL_Event *e, float scale)
 		u->mx = mx;
 		u->my = my;
 		if (!u->drag) return my >= u->log_y && my < u->log_y + u->log_h;
+		if (u->drag == H_COMP) { u->comp.cur = comp_at(u, mx, my); return 1; }
+		if (u->drag == H_SEL) { log_sel_at(u, mx, my, &u->sb_row, &u->sb_off); return 1; }
 		if (u->drag == H_SDRAG) u->side_w = mx;
 		else u->memb_w = u->win_w - mx;
 		return 1;
@@ -333,8 +406,10 @@ int ui_event(struct ui *u, const SDL_Event *e, float scale)
 	case SDL_EVENT_KEY_DOWN: {
 		SDL_Keycode k = e->key.key;
 		SDL_Keymod m = e->key.mod;
-		int pop = u->comp.buf[0] == ':' && !u->ask[0];
+		u->blink = SDL_GetTicks();
+		int pop = (u->comp.buf[0] == ':' && !u->ask[0]) || ment_open(u);
 		u->err[0] = 0;
+		if (!u->set_open && !u->ask[0] && !u->comp.n && try_bind(u, k, m)) return 1;
 		if (u->set_open) {
 			if (k == SDLK_ESCAPE) {
 				if (u->set_row >= 0) u->set_row = -1;
@@ -348,6 +423,17 @@ int ui_event(struct ui *u, const SDL_Event *e, float scale)
 				if (u->set_fsel >= u->set_nfont) u->set_fsel = u->set_nfont - 1;
 				return 1;
 			}
+			if (set_kind(u->set_row) == S_EMOJI) {
+				if (k == SDLK_LEFT || k == SDLK_RIGHT) {
+					u->set_slot += k == SDLK_LEFT ? -1 : 1;
+					if (u->set_slot < 0) u->set_slot = 0;
+					if (u->set_slot >= REACT_SLOTS) u->set_slot = REACT_SLOTS - 1;
+				} else if (k == SDLK_V && (m & SDL_KMOD_CTRL)) {
+					char *t = SDL_GetClipboardText();
+					if (t) { set_slot_put(u, t); SDL_free(t); }
+				}
+				return 1;
+			}
 			if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
 				set_apply(u, u->set_nfont ? u->set_font[u->set_fsel] : u->set_f.buf);
 				return 1;
@@ -358,6 +444,7 @@ int ui_event(struct ui *u, const SDL_Event *e, float scale)
 		}
 		if (k == SDLK_ESCAPE) {
 			if (u->card) { u->card = 0; return 1; }
+			if (u->lsel) { u->lsel = 0; return 1; }
 			if (u->ask_typing) { u->ask_typing = 0; u->ask[0] = 0; return 1; }
 			if (u->mode && !u->comp.n) { u->mode = M_NONE; return 1; }
 			if (u->comp.n || u->ask[0] || u->ninfo) cancel(u);
@@ -374,7 +461,16 @@ int ui_event(struct ui *u, const SDL_Event *e, float scale)
 			else ui_send(u);
 			return 1;
 		}
+		if ((m & SDL_KMOD_CTRL) && k == SDLK_C && u->comp.cur == u->comp.anc &&
+		    log_sel_copy(u)) { ui_err(u, "copied to clipboard"); return 1; }
 		if ((m & SDL_KMOD_CTRL) && k == SDLK_V && paste_file(u)) return 1;
+		if ((m & SDL_KMOD_CTRL) && k == SDLK_K) {        /* quick switcher: :go with its popup */
+			memset(&u->comp, 0, sizeof u->comp);
+			field_insert(&u->comp, ":go ");
+			u->pop_sel = 0;
+			track(u);
+			return 1;
+		}
 			if ((m & SDL_KMOD_CTRL) && k == SDLK_F) {
 			memset(&u->comp, 0, sizeof u->comp);
 			field_insert(&u->comp, "/");
@@ -408,6 +504,15 @@ int ui_event(struct ui *u, const SDL_Event *e, float scale)
 		if (k == SDLK_PAGEUP || k == SDLK_PAGEDOWN) {
 			u->scroll += (k == SDLK_PAGEUP ? 1 : -1) * draw_line_height(u->d) * 10;
 			if (u->scroll < 0) u->scroll = 0;
+			return 1;
+		}
+		if ((k == SDLK_HOME || k == SDLK_END) && !(m & SDL_KMOD_CTRL) && u->cnl > 1) {
+			int cl = 0;
+			for (int j = 0; j < u->cnl; j++) if (u->comp.cur >= u->cstart[j]) cl = j;
+			size_t e2 = u->cstart[cl + 1];
+			while (e2 > u->cstart[cl] && u->comp.buf[e2 - 1] == '\n') e2--;
+			u->comp.cur = k == SDLK_HOME ? u->cstart[cl] : e2;
+			if (!(m & SDL_KMOD_SHIFT)) u->comp.anc = u->comp.cur;
 			return 1;
 		}
 		if (k == SDLK_BACKSPACE && u->mode && !u->comp.cur) { u->mode = M_NONE; return 1; }

@@ -6,6 +6,14 @@
 
 /* ---- composer ---- */
 
+/* solid for the first beat after an edit, then a slow blink */
+static int caret_on(const struct ui *u)
+{
+	return ((SDL_GetTicks() - u->blink) / 700) % 2 == 0;
+}
+
+
+
 /* the labelled strip inside the composer box: a mode, or a question a command asked.
  * returns its height so the caller can step past it */
 static float bar(struct ui *u, float x, float y, float w, float bh)
@@ -52,7 +60,7 @@ float composer(struct ui *u, float x, float y, float w, int paint)
 		size_t fit = adv > 0 ? (size_t)(iw / adv) : 0;
 		for (size_t i = 0; i < u->comp.n && i < fit; i++)
 			draw_text(u->d, x + c->pad + 4 + adv * (float)i, y + c->pad, "*", 1, c->fg, DRAW_REGULAR);
-		if ((SDL_GetTicks() / 500) % 2 == 0)
+		if (caret_on(u))
 			draw_rect(u->d, x + c->pad + 4 + adv * (float)(u->comp.n < fit ? u->comp.n : fit),
 			          y + c->pad, 2, lh, c->fg, 255, 0);
 		return h;
@@ -75,7 +83,11 @@ float composer(struct ui *u, float x, float y, float w, int paint)
 	draw_rect(u->d, x, y, w, h, soft, 13, c->radius);
 	y += bar(u, x, y, w, bh);
 	hit(u, x, y, w, h - bh, H_COMP, 0, 0);
-	float cx = x + c->pad + 4, cy = y + c->pad;
+	float tx0 = x + c->pad + 4;
+	float cx = tx0, cy = y + c->pad;
+	u->comp_x = tx0;
+	u->comp_y = y + c->pad;
+	u->comp_lh = lh;
 	if (!u->comp.n) {
 		const char *ph = u->mode == M_DEL ? "y/n/a" : "message";
 		draw_text(u->d, cx, cy, ph, strlen(ph), c->dim, DRAW_REGULAR);
@@ -83,7 +95,7 @@ float composer(struct ui *u, float x, float y, float w, int paint)
 		size_t a, b;
 		field_sel(&u->comp, &a, &b);
 		for (int k = u->ctop; k < u->ctop + vis; k++) {
-			float lx = cx, ly = y + c->pad + (float)(k - u->ctop) * lh;
+			float lx = tx0, ly = y + c->pad + (float)(k - u->ctop) * lh;
 			size_t sx = starts[k], e = starts[k + 1], len = e - sx;
 			while (len && u->comp.buf[sx + len - 1] == '\n') len--;
 			if (a != b && b > sx && a < e) {  /* selection band under the run */
@@ -101,9 +113,39 @@ float composer(struct ui *u, float x, float y, float w, int paint)
 	}
 	float edge = x + c->pad + 4 + iw - 2;   /* trailing spaces hang, the caret must not */
 	if (cx > edge) cx = edge;
-	if ((SDL_GetTicks() / 500) % 2 == 0)
+	/* where the compositor puts the ime candidate list; window points, not logical px */
+	SDL_Window *win = SDL_GetRenderWindow(u->r);
+	float k = SDL_GetWindowPixelDensity(win) / (u->scale > 0 ? u->scale : 1);
+	if (k > 0) {
+		SDL_Rect ime = {(int)(tx0 / k), (int)(cy / k), (int)((edge - tx0) / k), (int)(lh / k)};
+		SDL_SetTextInputArea(win, &ime, (int)((cx - tx0) / k));
+	}
+	if (caret_on(u))
 		draw_rect(u->d, cx, cy, 2, lh, c->fg, 255, 0);
 	return h;
+}
+
+/* the offset a click at mx,my names, from the last paint's geometry */
+size_t comp_at(struct ui *u, float mx, float my)
+{
+	int vis = u->cnl > COMP_LINES ? COMP_LINES : u->cnl;
+	int k = u->ctop + (int)((my - u->comp_y) / u->comp_lh);
+	if (k < u->ctop) k = u->ctop;
+	if (k >= u->ctop + vis) k = u->ctop + vis - 1;
+	if (k >= u->cnl) k = u->cnl - 1;
+	if (k < 0) return 0;
+	size_t sx = u->cstart[k], e = u->cstart[k + 1];
+	while (e > sx && u->comp.buf[e - 1] == '\n') e--;
+	size_t i = sx;
+	while (i < e) {
+		size_t j = i + 1;
+		while (j < e && ((unsigned char)u->comp.buf[j] & 0xc0) == 0x80) j++;
+		float w0 = draw_measure(u->d, u->comp.buf + sx, i - sx, DRAW_REGULAR);
+		float w1 = draw_measure(u->d, u->comp.buf + sx, j - sx, DRAW_REGULAR);
+		if (mx < u->comp_x + (w0 + w1) / 2) break;   /* past a glyph's middle lands after it */
+		i = j;
+	}
+	return i;
 }
 
 /* caret one wrapped line up or down, keeping its column */
@@ -134,7 +176,12 @@ float popup(struct ui *u, float x, float bottom, float w)
 	int n = 0, args = 0;
 	if (u->ninfo) {
 		n = u->ninfo;
+	} else if ((n = ment_list(u, abuf, cand, &word, &wn)) > 0) {
+		args = 1;
+		for (int i = 0; i < n; i++) help[i] = NULL;
+		if (n > POP_ROWS) n = POP_ROWS;
 	} else if (u->comp.buf[0] == ':' && !u->ask[0]) {
+		n = 0;
 		n = arg_list(u, abuf, cand, help, 32, &word, &wn);
 		if (n < 0) {
 			struct cmd_line l;
@@ -146,7 +193,7 @@ float popup(struct ui *u, float x, float bottom, float w)
 			if (n > POP_ROWS) n = POP_ROWS;
 		}
 	}
-	if (!n) return 0;
+	if (n <= 0) return 0;
 	if (u->pop_sel >= n) u->pop_sel = n - 1;
 
 	uint8_t soft[3] = {255, 255, 255};
@@ -199,8 +246,10 @@ void profile_card(struct ui *u, float W, float H)
 	struct conf *c = u->c;
 	float lh = draw_line_height(u->d);
 	char name[WHIMSY_MAX_PET + 1], fp[WHIMSY_FP_LEN];
-	uint8_t col[3];
+	uint8_t col[3], self[WHIMSY_PK];
 	int ver = whimsy_verified(u->w, u->card_pk);
+	whimsy_self(u->w, self);
+	int mine = !memcmp(self, u->card_pk, WHIMSY_PK);
 	whimsy_petname(u->w, u->card_pk, name, sizeof name);
 	whimsy_fingerprint(fp, u->card_pk);
 	idcol(u, u->card_pk, col);
@@ -208,11 +257,14 @@ void profile_card(struct ui *u, float W, float H)
 	float bw = 360, iw = bw - c->pad * 4;
 	size_t st[MAXWRAP + 1];
 	int fl = wrap_lines(fp, strlen(fp), iw, draw_wrap, u->d, st, MAXWRAP);
-	float bh = c->pad * 4 + 44 + (float)fl * lh + lh;
+	float bh = c->pad * 5 + 44 + (float)fl * lh + (mine ? 0 : c->pad + lh);
 	float x = (W - bw) / 2, y = (H - bh) / 2;
 
-	draw_rect(u->d, x, y, bw, bh, c->bg, 244, c->radius);
-	draw_rect(u->d, x, y, bw, 1, c->line, 255, 0);
+	/* a raised surface, not a second sheet of glass: bg lifted toward the rule colour,
+	 * written over the window's own alpha rather than blended onto it */
+	uint8_t surf[3];
+	for (int k = 0; k < 3; k++) surf[k] = (uint8_t)((c->bg[k] * 3 + c->line[k]) / 4);
+	draw_rect_over(u->d, x, y, bw, bh, surf, 252, c->radius);
 	hit(u, x, y, bw, bh, H_CARD, 0, 0);
 
 	float tx = x + c->pad * 2, ty = y + c->pad * 2;
@@ -223,15 +275,24 @@ void profile_card(struct ui *u, float W, float H)
 
 	for (int k = 0; k < fl; k++, ty += lh)
 		draw_text(u->d, tx, ty, fp + st[k], st[k + 1] - st[k], c->dim, DRAW_REGULAR);
+	if (mine) return;   /* nothing to verify or dm with yourself */
 
-	ty += c->pad / 2;
+	ty += c->pad;
 	const char *b1 = ver ? "verified" : "verify";
 	float w1 = draw_measure(u->d, b1, strlen(b1), DRAW_REGULAR);
-	draw_text(u->d, tx, ty, b1, strlen(b1), ver ? c->dim : c->accent, DRAW_REGULAR);
-	if (!ver) hit(u, tx, ty, w1, lh, H_CBTN, 0, 0);
-	draw_text(u->d, tx + w1 + c->pad * 2, ty, "message", 7, c->accent, DRAW_REGULAR);
-	hit(u, tx + w1 + c->pad * 2, ty, draw_measure(u->d, "message", 7, DRAW_REGULAR), lh,
-	    H_CBTN, 1, 0);
+	float w2 = draw_measure(u->d, "message", 7, DRAW_REGULAR);
+	float bx = x + bw - c->pad * 2 - w2;
+	draw_text(u->d, bx, ty, "message", 7, c->accent, DRAW_REGULAR);
+	hit(u, bx, ty, w2, lh, H_CBTN, 1, 0);
+	bx -= c->pad * 2 + w1;
+	draw_text(u->d, bx, ty, b1, strlen(b1), ver ? c->dim : c->accent, DRAW_REGULAR);
+	hit(u, bx, ty, w1, lh, H_CBTN, 0, 0);
+
+	const char *b3 = whimsy_blocked(u->w, u->card_pk) ? "unblock" : "block";
+	float w3 = draw_measure(u->d, b3, strlen(b3), DRAW_REGULAR);
+	bx -= c->pad * 2 + w3;
+	draw_text(u->d, bx, ty, b3, strlen(b3), c->accent, DRAW_REGULAR);
+	hit(u, bx, ty, w3, lh, H_CBTN, 2, 0);
 }
 
 /* the image zoom and the text preview: one overlay, esc or a click closes it */
@@ -267,7 +328,7 @@ void file_overlay(struct ui *u, float W, float H)
 	int nl = file_lines(text, sn, off, len, max);
 	float bw = W - c->pad * 8, bh = (float)nl * lh + c->pad * 2;
 	float x = c->pad * 4, y = (H - bh) / 2;
-	draw_rect(u->d, x, y, bw, bh, c->bg, 244, c->radius);
+	draw_rect_over(u->d, x, y, bw, bh, c->bg, 244, c->radius);
 	for (int k = 0; k < nl; k++)
 		draw_cut(u, x + c->pad, y + c->pad + (float)k * lh, text + off[k], len[k],
 		         bw - c->pad * 2, c->fg);

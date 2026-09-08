@@ -10,7 +10,7 @@
 #define CMD_MAXW 6              /* words a command line is split into */
 
 /* what the popup completes an argument from */
-enum cmd_arg { CA_NONE, CA_SUB, CA_CHAN, CA_GROUP, CA_PEER, CA_KEY, CA_EMOJI, CA_PATH, CA_TEXT };
+enum cmd_arg { CA_NONE, CA_SUB, CA_CHAN, CA_GROUP, CA_PEER, CA_KEY, CA_EMOJI, CA_PATH, CA_TEXT, CA_NOTIFY, CA_GOTO };
 
 struct cmd {
 	const char *name;

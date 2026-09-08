@@ -1,6 +1,7 @@
 #include "ui_int.h"
 
 
+#include "audio.h"
 #include "file.h"
 #include "md.h"
 #include "wrap.h"
@@ -68,6 +69,7 @@ struct fbody {
 	const uint8_t *b;
 	size_t n, done, total;
 	SDL_Texture *t;
+	const char *aext;               /* the decoder for an audio row, NULL otherwise */
 	float iw, ih;
 	char info[64];                  /* the size, the chunk count, or "no longer held" */
 	char prev[PREV_BYTES];
@@ -110,6 +112,7 @@ SDL_Texture *tex_for(struct ui *u, size_t i, const uint8_t *b, size_t n,
 /* what a FILE row shows below its name: progress or size, then the image or the preview */
 static void file_body(struct ui *u, size_t i, float bw, struct fbody *f)
 {
+	struct whimsy_msg m;
 	memset(f, 0, sizeof *f);
 	whimsy_file_progress(u->w, u->g, i, &f->done, &f->total);
 	f->b = whimsy_file_open(u->w, u->g, i, &f->n);
@@ -122,6 +125,8 @@ static void file_body(struct ui *u, size_t i, float bw, struct fbody *f)
 		return;
 	}
 	file_human(f->n, f->info, sizeof f->info);
+	if (whimsy_msg(u->w, u->g, i, &m) == WHIMSY_OK && (f->aext = audio_ext(m.text, m.text_n)))
+		return;
 	if ((f->t = tex_for(u, i, f->b, f->n, bw * 0.4f, &f->iw, &f->ih))) return;
 
 	size_t raw = f->n < PREV_BYTES ? f->n : PREV_BYTES;
@@ -136,6 +141,7 @@ static float file_h(struct ui *u, size_t i, float bw)
 	struct fbody f;
 	float lh = draw_line_height(u->d);
 	file_body(u, i, bw, &f);
+	if (f.aext) return lh * 2 + u->c->gap;
 	if (f.t) return lh + f.ih + u->c->gap;
 	if (f.nl) return lh + (float)f.nl * lh + u->c->gap;
 	return lh;
@@ -158,7 +164,7 @@ static int ci_same(const char *a, const char *b)
 	return !*a && !*b;
 }
 
-/* the mime for the clipboard, and what the oversize prompt calls re-encodable */
+/* the mime for the clipboard, NULL when the name claims nothing we know */
 const char *mime_of(const char *name)
 {
 	const char *e = ext_of(name);
@@ -166,7 +172,42 @@ const char *mime_of(const char *name)
 	if (ci_same(e, "jpg") || ci_same(e, "jpeg")) return "image/jpeg";
 	if (ci_same(e, "gif")) return "image/gif";
 	if (ci_same(e, "bmp")) return "image/bmp";
+	if (ci_same(e, "wav")) return "audio/wav";
+	if (ci_same(e, "mp3")) return "audio/mpeg";
+	if (ci_same(e, "ogg") || ci_same(e, "oga")) return "audio/ogg";
 	return NULL;
+}
+
+/* what the oversize prompt calls re-encodable: img_shrink only handles pictures */
+int img_mime(const char *name)
+{
+	const char *m = mime_of(name);
+	return m && !strncmp(m, "image/", 6);
+}
+
+/* the md style covering byte off, 0 outside every run */
+static uint16_t style_at(const struct md_run *r, int nr, size_t off)
+{
+	for (int k = 0; k < nr; k++)
+		if (off >= r[k].at && off < r[k].at + r[k].n) return r[k].style;
+	return 0;
+}
+
+static int md_font(uint16_t st)
+{
+	return (st & MD_H1) ? DRAW_H1 : (st & MD_H2) ? DRAW_H2 :
+	       (st & MD_BOLD) ? DRAW_BOLD : (st & MD_ITALIC) ? DRAW_ITALIC : DRAW_REGULAR;
+}
+
+/* wrap_measure that sizes header runs at their own size, so a header wraps where it
+ * really ends. s points into ctx->b, which is what wrap_lines was handed */
+struct wrapctx { struct draw *d; const char *b; const struct md_run *r; int nr; };
+
+static float wrap_md(void *u, const char *s, size_t n)
+{
+	struct wrapctx *w = u;
+	uint16_t st = style_at(w->r, w->nr, (size_t)(s - w->b));
+	return draw_measure(w->d, s, n, (st & (MD_H1 | MD_H2)) ? md_font(st) : DRAW_REGULAR);
 }
 
 float row_height(struct ui *u, size_t i, float bw)
@@ -189,8 +230,13 @@ float row_height(struct ui *u, size_t i, float bw)
 		if (i < u->nrh) u->rh[i] = bh;
 		return bh;
 	}
-	int nl = n ? wrap_lines(b, n, bw, draw_wrap, u->d, starts, MAXWRAP) : 1;
-	float h = (float)nl * lh + 5 + (head ? lh : 0) + (date ? lh + c->gap : 0);
+	struct md_run mr[64];
+	int nmr = n ? md_scan(b, n, mr, 64) : 0;
+	struct wrapctx wc = {u->d, b, mr, nmr};
+	int nl = n ? wrap_lines(b, n, bw, wrap_md, &wc, starts, MAXWRAP) : 1;
+	float h = 5 + (head ? lh : 0) + (date ? lh + c->gap : 0);
+	for (int k = 0; k < nl; k++)
+		h += lh * (n ? draw_style_scale(md_font(style_at(mr, nmr, starts[k]))) : 1);
 	if (i == u->newat) h += lh + c->gap;
 	if (find_id(u, m.reply) != (size_t)-1) h += lh;
 	if (row_pills(u, i, p, 16)) h += lh + 4;
@@ -225,12 +271,94 @@ static void highlight(struct ui *u, float x, float y, const char *s, size_t n)
 	}
 }
 
+/* the selection, low end first; 0 when none stands */
+static int sel_range(struct ui *u, size_t *r0, size_t *o0, size_t *r1, size_t *o1)
+{
+	if (!u->lsel || u->sa_row == (size_t)-1) return 0;
+	int fwd = u->sa_row < u->sb_row || (u->sa_row == u->sb_row && u->sa_off <= u->sb_off);
+	*r0 = fwd ? u->sa_row : u->sb_row;
+	*o0 = fwd ? u->sa_off : u->sb_off;
+	*r1 = fwd ? u->sb_row : u->sa_row;
+	*o1 = fwd ? u->sb_off : u->sa_off;
+	return *r0 != *r1 || *o0 != *o1;
+}
+
+/* the selected byte range of row i, empty when none of it is selected */
+static void sel_of_row(struct ui *u, size_t i, size_t *lo, size_t *hi)
+{
+	size_t r0, o0, r1, o1;
+	*lo = *hi = 0;
+	if (!sel_range(u, &r0, &o0, &r1, &o1) || i < r0 || i > r1) return;
+	*lo = i == r0 ? o0 : 0;
+	*hi = i == r1 ? o1 : (size_t)-1;
+}
+
+void log_sel_at(struct ui *u, float mx, float my, size_t *row, size_t *off)
+{
+	const struct lspan *best = NULL;
+	float bd = 0;
+	struct whimsy_msg m;
+
+	*row = (size_t)-1;
+	*off = 0;
+	for (int k = 0; k < u->nlspan; k++) {
+		const struct lspan *s = &u->lspan[k];
+		float dy = my < s->y ? s->y - my : my >= s->y + s->h ? my - (s->y + s->h) : 0;
+		float dx = mx < s->x ? s->x - mx : mx >= s->x + s->w ? mx - (s->x + s->w) : 0;
+		float d = dy * 10000 + dx;      /* a span on the pointer's own line always wins */
+		if (!best || d < bd) { best = s; bd = d; }
+	}
+	if (!best) return;
+	*row = best->row;
+	*off = best->at;
+	if (whimsy_msg(u->w, u->g, best->row, &m) != WHIMSY_OK) return;
+
+	size_t j = best->at, end = best->at + best->len;
+	float px = best->x;
+	while (j < end) {
+		size_t step = 1;
+		float w;
+		while (j + step < end && ((unsigned char)m.text[j + step] & 0xc0) == 0x80) step++;
+		w = draw_measure(u->d, m.text + j, step, best->font);
+		if (mx < px + w / 2) break;
+		px += w;
+		j += step;
+	}
+	*off = j;
+}
+
+int log_sel_copy(struct ui *u)
+{
+	size_t r0, o0, r1, o1, n = 0;
+	uint16_t id = chan_id(u);
+	char buf[4096];
+
+	if (!sel_range(u, &r0, &o0, &r1, &o1)) return 0;
+	for (size_t i = r0; i <= r1 && n < sizeof buf; i++) {
+		struct whimsy_msg m;
+		size_t lo, hi, len;
+		if (whimsy_msg(u->w, u->g, i, &m) != WHIMSY_OK || m.channel != id || m.blocked) continue;
+		lo = i == r0 ? o0 : 0;
+		hi = i == r1 ? o1 : m.text_n;
+		if (hi > m.text_n) hi = m.text_n;
+		if (lo >= hi) continue;
+		if (n) buf[n++] = '\n';
+		len = hi - lo;
+		if (len > sizeof buf - n) len = sizeof buf - n;
+		memcpy(buf + n, m.text + lo, len);
+		n += len;
+	}
+	if (!n) return 0;
+	clip_set(buf, n);
+	return 1;
+}
+
 /* one wrapped line, cut at the md run boundaries. markers stay in the bytes drawn */
 static void draw_md_line(struct ui *u, size_t i, float x, float y, const char *b,
                          size_t at, size_t len, const struct md_run *r, int nr, int shown)
 {
 	struct conf *c = u->c;
-	float lh = draw_line_height(u->d);
+	float lh = draw_line_height(u->d) * draw_style_scale(md_font(style_at(r, nr, at)));
 	size_t end = at + len;
 
 	for (size_t p = at; p < end; ) {
@@ -240,12 +368,23 @@ static void draw_md_line(struct ui *u, size_t i, float x, float y, const char *b
 			if (p < r[k].at) { if (r[k].at < seg) seg = r[k].at; continue; }
 			if (p < r[k].at + r[k].n) { st = r[k].style; if (r[k].at + r[k].n < seg) seg = r[k].at + r[k].n; break; }
 		}
-		int font = (st & (MD_BOLD | MD_H1 | MD_H2)) ? DRAW_BOLD
-		         : (st & MD_ITALIC) ? DRAW_ITALIC : DRAW_REGULAR;
-		const uint8_t *col = (st & MD_LINK) ? c->accent : (st & MD_QUOTE) ? c->dim : c->fg;
+		int font = md_font(st);
+		const uint8_t *col = (st & (MD_LINK | MD_MENTION)) ? c->accent :
+		                     (st & MD_QUOTE) ? c->dim : c->fg;
 		float w = draw_measure(u->d, b + p, seg - p, font);
 		int hidden = (st & MD_SPOILER) && !shown;
+		if (u->nlspan < LSPANS)
+			u->lspan[u->nlspan++] = (struct lspan){i, p, seg - p, x, y, w, lh, font};
 		if (st & MD_CODE) draw_rect(u->d, x, y, w, lh, c->line, 90, c->radius / 2);
+		{                               /* the selected slice of this run, under its text */
+			size_t lo, hi, s0, s1;
+			sel_of_row(u, i, &lo, &hi);
+			s0 = p > lo ? p : lo;
+			s1 = seg < hi ? seg : hi;
+			if (s0 < s1)
+				draw_rect(u->d, x + draw_measure(u->d, b + p, s0 - p, font), y,
+				          draw_measure(u->d, b + s0, s1 - s0, font), lh, c->sel, 150, 0);
+		}
 		if (hidden) draw_rect(u->d, x, y, w, lh, c->dim, 235, c->radius / 2);
 		else draw_text(u->d, x, y, b + p, seg - p, col, font);
 		if ((st & MD_STRIKE) && !hidden) draw_rule(u->d, x, y + lh / 2, w, col);
@@ -267,45 +406,75 @@ static void draw_rule_label(struct ui *u, float x, float y, float w, const char 
 	draw_rule(u->d, mid + tw + c->gap, y + lh / 2, x + w - (mid + tw + c->gap), c->line);
 }
 
-/* the words that show at the right of the head line while the pointer is over a row */
-static float hover_strip(struct ui *u, size_t i, const struct whimsy_msg *m, float rx, float y)
+/* the pointer-over-a-row strip: one framed pill floating over the row's top right, so
+ * nothing below it reflows. nerd font icons, words on a face without them */
+static void hover_strip(struct ui *u)
 {
 	struct conf *c = u->c;
-	float lh = draw_line_height(u->d), w = 0;
-	const char *lab[4];
-	int act[4], nlab = 0;
+	struct whimsy_msg m;
+	size_t i = u->strip_i;
+	if (whimsy_msg(u->w, u->g, i, &m) != WHIMSY_OK) return;
 
-	lab[nlab] = "reply"; act[nlab++] = A_REPLY;
-	if (m->mine) { lab[nlab] = "edit"; act[nlab++] = A_EDIT; }
-	if (m->mine) { lab[nlab] = "delete"; act[nlab++] = A_DEL; }
-	lab[nlab] = "copy"; act[nlab++] = A_COPY;
-	for (int k = 0; k < nlab; k++)
-		w += draw_measure(u->d, lab[k], strlen(lab[k]), DRAW_REGULAR) + c->gap;
+	float lh = draw_line_height(u->d);
+	const float pad = 8, step = 4;   /* px, not glyph advances: an icon is wider than its cell */
+	struct item { const char *s; size_t n; int kind; size_t b; float w; } it[REACT_SLOTS + 4];
+	int n = 0;
 
-	int nre = 0;
-	const char *re[8];
-	size_t ren[8];
-	for (; nre < 8; nre++) {
-		re[nre] = react_nth(c->reacts, nre, &ren[nre]);
-		if (!re[nre]) break;
-		w += draw_measure(u->d, re[nre], ren[nre], DRAW_REGULAR) + c->gap;
+	for (int k = 0; k < REACT_SLOTS; k++) {
+		size_t en;
+		const char *em = react_nth(c->reacts, k, &en);
+		if (!em) break;
+		it[n++] = (struct item){em, en, H_RCT, (size_t)k, 0};
+	}
+	int nre = n;
+
+	static const uint32_t ICON[4] = {0xf112, 0xf044, 0xf1f8, 0xf0c5};
+	static const char *const LAB[4] = {"reply", "edit", "delete", "copy"};
+	static const int ACT[4] = {A_REPLY, A_EDIT, A_DEL, A_COPY};
+	static char txt[4][8];           /* one utf-8 icon each, or the word on a face without it */
+	for (int k = 0; k < 4; k++) {
+		if ((k == 1 || k == 2) && !m.mine) continue;
+		uint32_t cp = ICON[k];
+		size_t tn;
+		if (draw_has(u->d, cp)) {
+			txt[k][0] = (char)(0xe0 | cp >> 12);
+			txt[k][1] = (char)(0x80 | (cp >> 6 & 0x3f));
+			txt[k][2] = (char)(0x80 | (cp & 0x3f));
+			tn = 3;
+		} else {
+			tn = strlen(LAB[k]);
+			memcpy(txt[k], LAB[k], tn);
+		}
+		it[n++] = (struct item){txt[k], tn, H_ACT, (size_t)ACT[k], 0};
 	}
 
-	float x = rx - w + c->gap;
-	for (int k = 0; k < nre; k++) {
-		float tw = draw_measure(u->d, re[k], ren[k], DRAW_REGULAR);
-		draw_text(u->d, x, y, re[k], ren[k], c->dim, DRAW_REGULAR);
-		hit(u, x - c->gap / 2, y - 2, tw + c->gap, lh + 4, H_RCT, i, (size_t)k);
-		x += tw + c->gap;
+	/* every item sits in a cell at least as wide as it is tall, so the spacing is even
+	 * whatever each glyph's advance claims */
+	float w = 0;
+	for (int k = 0; k < n; k++) {
+		it[k].w = draw_measure(u->d, it[k].s, it[k].n, DRAW_REGULAR);
+		if (it[k].w < lh) it[k].w = lh;
+		w += it[k].w + (k ? step : 0);
 	}
-	for (int k = 0; k < nlab; k++) {
-		size_t ln = strlen(lab[k]);
-		float tw = draw_measure(u->d, lab[k], ln, DRAW_REGULAR);
-		draw_text(u->d, x, y, lab[k], ln, c->dim, DRAW_REGULAR);
-		hit(u, x - c->gap / 2, y - 2, tw + c->gap, lh + 4, H_ACT, i, (size_t)act[k]);
-		x += tw + c->gap;
+	if (nre && nre < n) w += step * 2;                       /* the divider's own column */
+
+	float ph = lh + pad * 2, pw = w + pad * 2;
+	float px = u->strip_x - pw, py = u->strip_y - pad;
+	float rad = c->radius / 2 + 2;
+	draw_rect(u->d, px, py, pw, ph, c->line, 120, rad);
+	draw_rect(u->d, px + 1, py + 1, pw - 2, ph - 2, c->bg, 165, rad - 1);
+
+	float x = px + pad;
+	for (int k = 0; k < n; k++) {
+		if (k == nre && nre && nre < n) {
+			draw_rule(u->d, x + step - 1, py + pad / 2, 1, c->line);
+			x += step * 2;
+		}
+		float tw = draw_measure(u->d, it[k].s, it[k].n, DRAW_REGULAR);
+		draw_text(u->d, x + (it[k].w - tw) / 2, u->strip_y, it[k].s, it[k].n, c->dim, DRAW_REGULAR);
+		hit_top(u, x - step / 2, py, it[k].w + step, ph, it[k].kind, i, it[k].b);
+		x += it[k].w + step;
 	}
-	return w;
 }
 
 static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, float bw)
@@ -320,14 +489,20 @@ static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, floa
 	int hov = u->my >= y && u->my < y + rh && u->mx >= x && u->mx < x + w;
 	if (m.blocked) hov = 0;         /* nothing to reply to, edit, copy or react to */
 
+	/* named us, or answers something of ours: the same accent the mention wears */
+	size_t rto = find_id(u, m.reply);
+	struct whimsy_msg rm;
+	int at_me = m.mentions ||
+	            (!m.mine && rto != (size_t)-1 && whimsy_msg(u->w, u->g, rto, &rm) == WHIMSY_OK && rm.mine);
 	int armed = u->mode && i == u->mode_i;
-	if (hov || armed) {
+	if (hov || armed || at_me) {
 		float skip = 0;
 		if (i == u->newat) skip += lh + c->gap;
 		if (date) skip += lh + c->gap;
 		draw_rect2(u->d, x + MIDPAD - 4, y + skip, w - MIDPAD * 2 + 8, rh - skip,
-		           armed ? c->accent : c->sel, armed ? 26 : 40, 0, c->radius / 2);
-		if (armed)
+		           armed || at_me ? c->accent : c->sel,
+		           armed ? 26 : at_me ? (hov ? 34 : 18) : 40, 0, c->radius / 2);
+		if (armed || at_me)
 			draw_rect(u->d, x + MIDPAD - 4, y + skip, 2, rh - skip, c->accent, 255, 0);
 	}
 	if (i == u->newat) {
@@ -343,7 +518,7 @@ static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, floa
 		draw_rule_label(u, x + MIDPAD, y, w - MIDPAD * 2, day);
 		y += lh + c->gap;
 	}
-	float hw = hov ? hover_strip(u, i, &m, x + w - MIDPAD, y) : 0;
+	if (hov) { u->strip_on = 1; u->strip_i = i; u->strip_x = x + w - MIDPAD; u->strip_y = y; }
 	if (head) {
 		char name[128], hhmm[8];
 		uint8_t col[3];
@@ -367,7 +542,7 @@ static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, floa
 		return;
 	}
 
-	size_t to = find_id(u, m.reply);
+	size_t to = rto;
 	if (to != (size_t)-1) {                 /* one quoted line; clicking it jumps */
 		struct whimsy_msg q;
 		if (whimsy_msg(u->w, u->g, to, &q) == WHIMSY_OK) {
@@ -381,8 +556,7 @@ static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, floa
 			                  (int)(qn > 100 ? 100 : qn), qb);
 			if (ln >= (int)sizeof lead) ln = (int)sizeof lead - 1;
 			for (int k = 0; k < ln; k++) if (lead[k] == '\n') lead[k] = ' ';
-			/* the strip shares this line when the row has no head, so give way to it */
-			draw_cut(u, bx, y, lead, (size_t)ln, head ? bw : bw - hw, c->dim);
+			draw_cut(u, bx, y, lead, (size_t)ln, bw, c->dim);
 			hit(u, bx, y, bw, lh, H_GOTO, to, 0);
 		}
 		y += lh;
@@ -393,8 +567,10 @@ static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, floa
 	n = m.text_n;
 	struct md_run run[64];
 	int nrun = n ? md_scan(b, n, run, 64) : 0;
-	int nl = n ? wrap_lines(b, n, bw, draw_wrap, u->d, starts, MAXWRAP) : 0;
+	struct wrapctx wc = {u->d, b, run, nrun};
+	int nl = n ? wrap_lines(b, n, bw, wrap_md, &wc, starts, MAXWRAP) : 0;
 	for (int k = 0; k < nl; k++) {
+		float klh = lh * draw_style_scale(md_font(style_at(run, nrun, starts[k])));
 		size_t len = starts[k + 1] - starts[k];
 		while (len && b[starts[k] + len - 1] == '\n') len--;
 		highlight(u, bx, y, b + starts[k], len);
@@ -402,7 +578,7 @@ static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, floa
 		if (k == nl - 1 && m.edited)
 			draw_text(u->d, bx + draw_measure(u->d, b + starts[k], len, DRAW_REGULAR) + c->gap,
 			          y, "edited", 6, c->dim, DRAW_REGULAR);
-		y += lh;
+		y += klh;
 	}
 
 	if (m.kind == WHIMSY_K_FILE) {
@@ -421,7 +597,23 @@ static void draw_row_msg(struct ui *u, size_t i, float x, float y, float w, floa
 			}
 		}
 		y += lh;
-		if (f.t) {
+		if (f.aext) {
+			float frac = 0;
+			int st = audio_state(u->g, i, &frac);
+			const char *lab = st == AUDIO_PLAYING ? "pause" : "play";
+			size_t ln = strlen(lab);
+			float tw = draw_measure(u->d, lab, ln, DRAW_REGULAR);
+			float bx2 = bx + tw + c->pad, bwid = bw - tw - c->pad;
+			draw_text(u->d, bx, y, lab, ln, c->accent, DRAW_REGULAR);
+			hit(u, bx, y, tw, lh, H_AUDIO, i, 0);
+			if (bwid > 0) {
+				float by = y + lh / 2 - 2;
+				draw_rect(u->d, bx2, by, bwid, 4, c->line, 200, 2);
+				if (st) draw_rect(u->d, bx2, by, bwid * frac, 4, c->accent, 255, 2);
+				hit(u, bx2, y, bwid, lh, H_AUDIO, i, 1);
+			}
+			y += lh + c->gap;
+		} else if (f.t) {
 			draw_image_at(u->d, f.t, bx, y, f.iw, f.ih);
 			hit(u, bx, y, f.iw, f.ih, H_ZOOM, i, OV_IMAGE);
 			y += f.ih + c->gap;
@@ -461,6 +653,7 @@ void log_pane(struct ui *u, float x, float y, float w, float h)
 	struct conf *c = u->c;
 	float bw = w - MIDPAD * 2 - AV - 10;
 	u->log_y = y; u->log_h = h;
+	u->nlspan = 0;
 	if (bw != u->cache_w) { u->cache_w = bw; invalidate(u); }
 	size_t n = whimsy_msg_count(u->w, u->g);
 	uint16_t id = chan_id(u);
@@ -488,8 +681,10 @@ void log_pane(struct ui *u, float x, float y, float w, float h)
 		draw_text(u->d, x + MIDPAD, y + c->pad, "no messages here yet", 20, c->dim, DRAW_REGULAR);
 		return;
 	}
+	u->strip_on = 0;
 	for (int k = nvis; k-- > 0; )
 		if (top[k] < y + h) draw_row_msg(u, idx[k], x, top[k], w, bw);
+	if (u->strip_on) hover_strip(u);
 
 	/* scrolled up with arrivals below: the pill that jumps back down */
 	size_t un = whimsy_unread(u->w, u->g, id);

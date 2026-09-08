@@ -38,8 +38,8 @@ static const char DEFAULT_FILE[] =
 "pad = 8\n"
 "gap = 6\n"
 "\n"
-"# the 8 emoji the hover strip offers\n"
-"reacts = \xf0\x9f\x91\x8d \xe2\x9d\xa4 \xf0\x9f\x98\x82 \xf0\x9f\x8e\x89 \xf0\x9f\x98\xae \xf0\x9f\x98\xa2 \xf0\x9f\x99\x8f \xf0\x9f\x94\xa5\n"
+"# the 3 emoji the hover strip offers. emoji only, no other text\n"
+"reacts = \xf0\x9f\x91\x8d \xe2\x9d\xa4 \xf0\x9f\x98\x82\n"
 "\n"
 "# ask before deleting a message; the confirm's `a` answer clears this\n"
 "confirm_delete = 1\n"
@@ -55,6 +55,9 @@ static const char DEFAULT_FILE[] =
 "# run for every message that arrives. %g group, %c channel, %s sender, %t text,\n"
 "# %a the cached avatar path. text only reaches it when you put %t here\n"
 "notify = notify-send \"%g #%c\"\n"
+"\n"
+"# bind = <key> <command line>, without the leading ':'. `bind = <key>` alone kills the\n"
+"# key. modifiers ctrl alt shift joined with +, then an SDL key name: bind = ctrl+g group n\n"
 "\n"
 "# pane layout, rewritten by the gui when you drag a splitter or toggle a pane\n"
 "side_w = 220\n"
@@ -79,7 +82,63 @@ static void defaults(struct conf *c)
 	snprintf(c->close, sizeof c->close, "quit");
 	snprintf(c->notify, sizeof c->notify, "notify-send \"%%g #%%c\"");
 	c->avatars = 1;
-	snprintf(c->reacts, sizeof c->reacts, "\xf0\x9f\x91\x8d \xe2\x9d\xa4 \xf0\x9f\x98\x82 \xf0\x9f\x8e\x89 \xf0\x9f\x98\xae \xf0\x9f\x98\xa2 \xf0\x9f\x99\x8f \xf0\x9f\x94\xa5");
+	snprintf(c->reacts, sizeof c->reacts, "\xf0\x9f\x91\x8d \xe2\x9d\xa4 \xf0\x9f\x98\x82");
+}
+
+/* one `+` separated spec into ctrl+alt+shift+name */
+int conf_keyspec(const char *spec, char *out, size_t cap)
+{
+	char buf[64], name[32] = {0};
+	int ctrl = 0, alt = 0, shift = 0, n = 0;
+
+	if (snprintf(buf, sizeof buf, "%s", spec) >= (int)sizeof buf) return 0;
+	for (char *p = buf; *p; p++) if (*p >= 'A' && *p <= 'Z') *p += 32;
+
+	for (char *p = buf, *tok = buf;; p++) {
+		if (*p && *p != '+') continue;
+		int end = !*p;
+		*p = 0;
+		if (!*tok) return 0;
+		if      (!strcmp(tok, "ctrl")  && !end) ctrl = 1;
+		else if (!strcmp(tok, "alt")   && !end) alt = 1;
+		else if (!strcmp(tok, "shift") && !end) shift = 1;
+		else if (n++ == 0) snprintf(name, sizeof name, "%s", tok);
+		else return 0;
+		if (end) break;
+		tok = p + 1;
+	}
+	if (!*name) return 0;
+	/* the names SDL_GetKeyName gives, spelled the way people write them */
+	if (!strcmp(name, "enter")) snprintf(name, sizeof name, "return");
+	else if (!strcmp(name, "esc")) snprintf(name, sizeof name, "escape");
+
+	return snprintf(out, cap, "%s%s%s%s", ctrl ? "ctrl+" : "", alt ? "alt+" : "",
+	                shift ? "shift+" : "", name) < (int)cap;
+}
+
+const char *conf_bind(const struct conf *c, const char *key)
+{
+	for (int i = 0; i < c->nbind; i++)
+		if (!strcmp(c->bind[i].key, key)) return c->bind[i].cmd;
+	return NULL;
+}
+
+static void bind(struct conf *c, char *val)
+{
+	char key[24];
+	char *cmd = val;
+
+	if (c->nbind < 0 || c->nbind >= CONF_BINDS) return;
+	while (*cmd && *cmd != ' ' && *cmd != '\t') cmd++;
+	if (*cmd) *cmd++ = 0;
+	while (*cmd == ' ' || *cmd == '\t') cmd++;
+	if (!conf_keyspec(val, key, sizeof key)) return;
+
+	int i = 0;
+	while (i < c->nbind && strcmp(c->bind[i].key, key)) i++;
+	if (i == c->nbind) c->nbind++;
+	snprintf(c->bind[i].key, sizeof c->bind[i].key, "%s", key);
+	snprintf(c->bind[i].cmd, sizeof c->bind[i].cmd, "%s", cmd);
 }
 
 static int hexv(int ch)
@@ -116,6 +175,33 @@ static void str(char *out, size_t cap, const char *v)
 	snprintf(out, cap, "%s", v);
 }
 
+/* REACT_SLOTS space separated emoji and nothing else. utf-8 mis-decoded once lands in
+ * U+0080..U+07FF, so a floor of U+2000 rejects that as well as ascii */
+int conf_reacts_ok(const char *v)
+{
+	int tok = 0;
+	for (const unsigned char *p = (const unsigned char *)v; *p; ) {
+		if (*p == ' ') { p++; continue; }
+		if (++tok > REACT_SLOTS) return 0;
+		for (; *p && *p != ' '; ) {
+			uint32_t cp;
+			int n;
+			if (*p < 0x80) return 0;
+			else if ((*p & 0xe0) == 0xc0) { cp = *p & 0x1fu; n = 1; }
+			else if ((*p & 0xf0) == 0xe0) { cp = *p & 0x0fu; n = 2; }
+			else if ((*p & 0xf8) == 0xf0) { cp = *p & 0x07u; n = 3; }
+			else return 0;
+			for (int i = 1; i <= n; i++) {
+				if ((p[i] & 0xc0) != 0x80) return 0;
+				cp = cp << 6 | (p[i] & 0x3fu);
+			}
+			if (cp < 0x2000) return 0;
+			p += n + 1;
+		}
+	}
+	return tok > 0;
+}
+
 static char *trim(char *s)
 {
 	while (*s == ' ' || *s == '\t') s++;
@@ -148,12 +234,13 @@ static void apply(struct conf *c, char *key, char *val)
 	/* only on a value it knows, so conf_set's accepts() rejects anything else */
 	else if (!strcmp(key, "close") && (!strcmp(val, "quit") || !strcmp(val, "hide")))
 		str(c->close, sizeof c->close, val);
-	else if (!strcmp(key, "reacts"))      str(c->reacts, sizeof c->reacts, val);
+	else if (!strcmp(key, "reacts") && conf_reacts_ok(val)) str(c->reacts, sizeof c->reacts, val);
 	else if (!strcmp(key, "confirm_delete")) num(&c->confirm_delete, val, 0, 1);
 	else if (!strcmp(key, "side_w"))      num(&c->side_w, val, 0, 4096);
 	else if (!strcmp(key, "memb_w"))      num(&c->memb_w, val, 0, 4096);
 	else if (!strcmp(key, "side_open"))   num(&c->side_open, val, 0, 1);
 	else if (!strcmp(key, "memb_open"))   num(&c->memb_open, val, 0, 1);
+	else if (!strcmp(key, "bind"))        bind(c, val);
 }
 
 /* fgets split an over-long line; without this its tail parses as a fresh key = value.

@@ -55,6 +55,7 @@ struct whimsy_msg {
 	int mine;
 	int blocked;                    /* the sender is blocked: the text is stored, not shown */
 	int edited;                     /* the sender replaced the text; the old one is gone */
+	int mentions;                   /* the text carries our mention token, see whimsy_mention */
 	/* WHIMSY_MSGID bytes each. id is what whimsy_send_reply takes; it is NULL on a
 	 * message stored before replies existed, which nothing can answer. reply is the
 	 * message this one answers, NULL when it answers none */
@@ -101,9 +102,10 @@ size_t whimsy_petname(const struct whimsy *w, const uint8_t pk[WHIMSY_PK], char 
  * A frontend merges linked members into one row and still attributes each message to
  * the key that signed it. */
 /* Out-of-band verification: a record that this user compared pk's fingerprint with
- * its owner somewhere else. Local, never sent, and final -- there is no unverify. A
- * linked device is its own key and is verified on its own. */
+ * its owner somewhere else. Local, never sent. A linked device is its own key and is
+ * verified on its own. */
 int whimsy_verify(struct whimsy *w, const uint8_t pk[WHIMSY_PK]);
+int whimsy_unverify(struct whimsy *w, const uint8_t pk[WHIMSY_PK]);
 int whimsy_verified(const struct whimsy *w, const uint8_t pk[WHIMSY_PK]);
 
 /* Blocking is inbound only, local, and never sent. A blocked key's messages still
@@ -122,6 +124,8 @@ int whimsy_block(struct whimsy *w, const uint8_t pk[WHIMSY_PK], int on);
 int whimsy_blocked(const struct whimsy *w, const uint8_t pk[WHIMSY_PK]);
 
 int whimsy_link(struct whimsy *w, const uint8_t pk[WHIMSY_PK]);
+/* drops our half; one half gone is enough, so the peer's declaration may stay */
+int whimsy_unlink(struct whimsy *w, const uint8_t pk[WHIMSY_PK]);
 /* keys mutually linked with pk, at most cap of them, WHIMSY_PK bytes each; returns
  * how many were written */
 size_t whimsy_links(const struct whimsy *w, const uint8_t pk[WHIMSY_PK],
@@ -282,9 +286,24 @@ int whimsy_set(struct whimsy *w, int k, const char *val);
  * frontend reads this right after polling. snprintf-style. */
 struct whimsy_event { size_t group; uint16_t channel; };
 size_t whimsy_events(const struct whimsy *w, struct whimsy_event *out, size_t cap);
-/* per group, local, never sent; whimsy_events honours it, unread counts do not */
-int whimsy_mute(struct whimsy *w, size_t g, int on);
+/* Per group, local, never sent; whimsy_events honours it, unread counts do not. The
+ * values are what a MUTE record holds, so 1 stays mute for a store an older build wrote. */
+enum whimsy_notify {
+	WHIMSY_N_ALL,
+	WHIMSY_N_MUTE,                  /* nothing, not even a count worth showing */
+	WHIMSY_N_MENTION,               /* only messages carrying our mention token */
+	WHIMSY_N_NONE                   /* no event; unread counts still stand */
+};
+int whimsy_notify(struct whimsy *w, size_t g, int level);
+int whimsy_notify_level(const struct whimsy *w, size_t g);
 int whimsy_muted(const struct whimsy *w, size_t g);
+
+/* The one form a mention takes on the wire: '@' and the first group of the mentioned
+ * key's fingerprint, which is also what whimsy_petname falls back to. Local petnames
+ * cannot travel, so this is what a frontend inserts and what whimsy_msg.mentions
+ * matches against our own key. */
+#define WHIMSY_MENTION_LEN 8
+void whimsy_mention(char out[WHIMSY_MENTION_LEN], const uint8_t pk[WHIMSY_PK]);
 
 /* one fetch round trip: stores and acks everything waiting. returns how many
  * blobs changed something, so > 0 means redraw. */

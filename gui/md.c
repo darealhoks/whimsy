@@ -37,6 +37,17 @@ static size_t closer(const char *s, size_t i, size_t e, const char *mark, size_t
 	return e;
 }
 
+/* '@' and six hex digits, the shape whimsy_mention writes */
+static int ment_at(const char *s, size_t i, size_t e)
+{
+	if (s[i] != '@' || e - i < 7) return 0;
+	for (size_t k = 1; k < 7; k++) {
+		char c = s[i + k];
+		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return 0;
+	}
+	return 1;
+}
+
 static int url_at(const char *s, size_t i, size_t e)
 {
 	size_t n = e - i;
@@ -56,6 +67,12 @@ static void inl(struct emit *em, const char *s, size_t i, size_t e, uint16_t bas
 			push(em, plain, i, base);
 			push(em, i, j, base | MD_LINK);
 			plain = i = j;
+			continue;
+		}
+		if (ment_at(s, i, e) && (i == plain || s[i - 1] == ' ')) {
+			push(em, plain, i, base);
+			push(em, i, i + 7, base | MD_MENTION);
+			plain = i = i + 7;
 			continue;
 		}
 		size_t k = 0;

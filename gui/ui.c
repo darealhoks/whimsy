@@ -1,5 +1,7 @@
 #include "ui_int.h"
 
+#include "audio.h"
+
 #include <stdlib.h>
 
 #include "file.h"
@@ -77,6 +79,7 @@ void select_group(struct ui *u, size_t g, size_t ch)
 	u->chan = ch;
 	u->scroll = 0;
 	u->mode = M_NONE;
+	u->lsel = 0;
 	u->act_i = (size_t)-1;
 	u->card = 0;
 	invalidate(u);
@@ -325,6 +328,8 @@ int ui_open(struct ui **out, struct whimsy *w, struct draw *d, struct conf *c, S
 void ui_close(struct ui *u)
 {
 	if (!u) return;
+	audio_stop();
+	crop_close(u);
 	for (int k = 0; k < WHIMSY_HELD; k++) draw_image_free(u->tex[k].t);
 	for (int k = 0; k < AVATARS; k++) if (u->av[k].t) draw_image_free(u->av[k].t);
 	free(u->clipdata);

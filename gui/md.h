@@ -18,6 +18,7 @@
 #define MD_H1      0x80
 #define MD_H2      0x100
 #define MD_BLOCK   0x200        /* fenced code, with MD_CODE */
+#define MD_MENTION 0x400        /* '@' and six hex: whimsy_mention's token */
 
 struct md_run {
 	size_t at, n;

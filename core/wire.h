@@ -66,10 +66,11 @@ enum wire_bkind { WIRE_B_GROUP = 1, WIRE_B_SEALED };
  * PURGE is the owner's: payload is a u64 watermark, and every message in the body's
  * channel at or before that time goes. not a count -- row order is local receive
  * order, so a count would purge a different set on every device.
- * HEAL is a member's ask for a fresh record and a re-seal; no reply, no payload */
+ * HEAL is a member's ask for a fresh record and a re-seal; no reply, no payload.
+ * UNLINK revokes a LINK the sender declared: same payload, the other key */
 enum wire_kind  { WIRE_K_TEXT = 1, WIRE_K_FILE, WIRE_K_MEMBERSHIP, WIRE_K_LINK,
                   WIRE_K_EDIT, WIRE_K_DELETE, WIRE_K_TYPING, WIRE_K_REACT,
-                  WIRE_K_GAVATAR, WIRE_K_PURGE, WIRE_K_HEAL };
+                  WIRE_K_GAVATAR, WIRE_K_PURGE, WIRE_K_HEAL, WIRE_K_UNLINK };
 /* the first byte of a sealed inner. AVATAR's rest is the encoded bytes, empty clears */
 enum wire_inner { WIRE_I_SENDERKEY = 1, WIRE_I_AVATAR };
 enum wire_ecode { WIRE_E_BADREQ = 1, WIRE_E_BADTOKEN, WIRE_E_NOACCOUNT, WIRE_E_NOMAILBOX,

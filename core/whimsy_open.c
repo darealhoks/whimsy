@@ -7,36 +7,48 @@
 #include <unistd.h>
 /* notifications */
 
-void note_event(struct grp *gr, uint16_t chan)
+void note_event(struct grp *gr, uint16_t chan, int mention)
 {
-	for (size_t i = 0; i < gr->nevt; i++) if (gr->evt[i] == chan) return;
-	if (gr->nevt < WIRE_MAX_CHANNELS) gr->evt[gr->nevt++] = chan;
+	for (size_t i = 0; i < gr->nevt; i++)
+		if (gr->evt[i] == chan) { gr->ment[i] |= mention != 0; return; }
+	if (gr->nevt == WIRE_MAX_CHANNELS) return;
+	gr->ment[gr->nevt] = mention != 0;
+	gr->evt[gr->nevt++] = chan;
 }
 
 size_t whimsy_events(const struct whimsy *w, struct whimsy_event *out, size_t cap)
 {
 	size_t n = 0;
 	for (size_t g = 0; g < w->ng; g++) {
-		if (w->g[g]->muted) continue;
-		for (size_t i = 0; i < w->g[g]->nevt; i++, n++)
+		int lv = w->g[g]->notify;
+		if (lv == WHIMSY_N_MUTE || lv == WHIMSY_N_NONE) continue;
+		for (size_t i = 0; i < w->g[g]->nevt; i++) {
+			if (lv == WHIMSY_N_MENTION && !w->g[g]->ment[i]) continue;
 			if (n < cap) { out[n].group = g; out[n].channel = w->g[g]->evt[i]; }
+			n++;
+		}
 	}
 	return n;
 }
 
-int whimsy_muted(const struct whimsy *w, size_t g)
+int whimsy_notify_level(const struct whimsy *w, size_t g)
 {
-	return g < w->ng && w->g[g]->muted;
+	return g < w->ng ? w->g[g]->notify : WHIMSY_N_ALL;
 }
 
-int whimsy_mute(struct whimsy *w, size_t g, int on)
+int whimsy_muted(const struct whimsy *w, size_t g)
 {
-	if (g >= w->ng) return WHIMSY_EARG;
+	return whimsy_notify_level(w, g) == WHIMSY_N_MUTE;
+}
+
+int whimsy_notify(struct whimsy *w, size_t g, int level)
+{
+	if (g >= w->ng || level < WHIMSY_N_ALL || level > WHIMSY_N_NONE) return WHIMSY_EARG;
 	uint8_t rec[WHIMSY_GID + 1];
 	memcpy(rec, w->g[g]->g.id, WHIMSY_GID);
-	rec[WHIMSY_GID] = on ? 1 : 0;
+	rec[WHIMSY_GID] = (uint8_t)level;
 	int e = map_store(store_append(w->st, STORE_MUTE, rec, sizeof rec));
-	if (!e) w->g[g]->muted = on ? 1 : 0;
+	if (!e) w->g[g]->notify = level;
 	return e;
 }
 
@@ -200,8 +212,11 @@ static int load(struct whimsy *w, int *have_id, int *skipped)
 			break;
 		}
 		case STORE_LINK:
-			if (n != 2 * WHIMSY_PK) { skip = 1; break; }
-			e = add_link(w, p, p + WHIMSY_PK);
+			if (n != 2 * WHIMSY_PK && n != 2 * WHIMSY_PK + 1) { skip = 1; break; }
+			if (n == 2 * WHIMSY_PK || p[2 * WHIMSY_PK])
+				e = add_link(w, p, p + WHIMSY_PK);
+			else
+				del_link(w, p, p + WHIMSY_PK);
 			if (e == WHIMSY_ESTATE || e == WHIMSY_EARG) e = WHIMSY_OK;
 			break;
 		case STORE_SETTING:
@@ -272,9 +287,10 @@ static int load(struct whimsy *w, int *have_id, int *skipped)
 			e = push_msg(gr, i);
 			break;
 		}
-		case STORE_VERIFY:
-			if (n != WHIMSY_PK) { skip = 1; break; }
-			e = add_ver(w, p);
+		case STORE_VERIFY:      /* pk alone is an old record: always a verify */
+			if (n != WHIMSY_PK && n != WHIMSY_PK + 1) { skip = 1; break; }
+			if (n == WHIMSY_PK || p[WHIMSY_PK]) e = add_ver(w, p);
+			else del_ver(w, p);
 			break;
 		case STORE_AVATAR:
 			if (n < WHIMSY_PK || n > WHIMSY_PK + WHIMSY_MAX_AVATAR) { skip = 1; break; }
@@ -295,7 +311,7 @@ static int load(struct whimsy *w, int *have_id, int *skipped)
 		case STORE_MUTE: {
 			struct grp *gr = n != WHIMSY_GID + 1 ? NULL : find_grp(w, p);
 			if (!gr) { skip = 1; break; }
-			gr->muted = p[WHIMSY_GID] != 0;
+			gr->notify = p[WHIMSY_GID] <= WHIMSY_N_NONE ? p[WHIMSY_GID] : WHIMSY_N_MUTE;
 			break;
 		}
 		case STORE_GONE:                /* read on demand, by gone_ver */

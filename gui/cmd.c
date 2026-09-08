@@ -4,7 +4,7 @@
 
 /* args and help are the popup's whole documentation, so they read as the user types */
 const struct cmd cmd_table[] = {
-	{"group",  "n|r|d|a <name>",     "new group, rename, leave, avatar", {CA_SUB, CA_GROUP, CA_TEXT}, 0},
+	{"grp",    "n|r|d|a <name>",     "new group, rename, delete, picture", {CA_SUB, CA_GROUP, CA_TEXT}, 0},
 	{"chan",   "n|r|d <name> [new]", "channel: new, rename, delete",    {CA_SUB, CA_CHAN, CA_TEXT}, 1},
 	{"add",    "<pk>",               "add a member",                    {CA_PEER, 0, 0}, 1},
 	{"kick",   "<pk|pet>",           "remove a member",                 {CA_PEER, 0, 0}, 1},
@@ -12,17 +12,20 @@ const struct cmd cmd_table[] = {
 	{"pet",    "<pk|pet> <name>",    "local petname, empty clears",     {CA_PEER, CA_TEXT, 0}, 0},
 	{"verify", "[pk|pet]",           "fingerprints, or mark compared",  {CA_PEER, 0, 0}, 0},
 	{"link",   "<pk>",               "your other device, run on both",  {CA_PEER, 0, 0}, 0},
+	{"unlink", "<pk|pet>",           "revoke your half of a link",      {CA_PEER, 0, 0}, 0},
 	{"file",   "[path]",             "send a file, empty picks one",    {CA_PATH, 0, 0}, 0},
-	{"avatar", "[path]",             "your avatar, empty clears it",    {CA_PATH, 0, 0}, 0},
+	{"avatar", "[path|off]",         "your picture, empty picks one",   {CA_PATH, 0, 0}, 0},
 	{"save",   "[path]",             "save the file, empty asks where", {CA_PATH, 0, 0}, 0},
 	{"purge",  "<n> | all <n>",       "delete your last n; all: everyone's oldest n", {CA_SUB, 0, 0}, 0},
 	{"block",  "<pk|pet>",           "hide what a key sends, again shows", {CA_PEER, 0, 0}, 0},
-	{"mute",   "",                   "mute this group, again unmutes",  {0, 0, 0}, 0},
+	{"notify", "all|mentions|none|mute", "what this group is allowed to interrupt with", {CA_NOTIFY, 0, 0}, 0},
+	{"go",     "<name>",             "jump to a channel, group or dm",  {CA_GOTO, 0, 0}, 0},
 	{"me",     "",                   "your key and fingerprint",        {0, 0, 0}, 0},
 	{"pass",   "",                   "change the store passphrase",     {0, 0, 0}, 0},
 	{"server", "",                   "paste another invite",            {0, 0, 0}, 0},
 	{"set",    "[key] [value]",      "settings; alone lists them",      {CA_KEY, CA_TEXT, 0}, 0},
 	{"nuke",   "",                   "erase everything on this device",   {0, 0, 0}, 0},
+	{"hide",   "",                   "hide the window, keep running",   {0, 0, 0}, 0},
 	{"quit",   "",                   "close whimsy",                    {0, 0, 0}, 0},
 };
 const int cmd_count = (int)(sizeof cmd_table / sizeof *cmd_table);

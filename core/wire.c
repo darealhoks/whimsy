@@ -276,7 +276,7 @@ static int body_len_ok(uint8_t kind, size_t n)
 
 int wire_encode_body(uint8_t *out, size_t cap, size_t *len, const struct wire_body *b)
 {
-	if (b->kind < WIRE_K_TEXT || b->kind > WIRE_K_HEAL) return WIRE_ETYPE;
+	if (b->kind < WIRE_K_TEXT || b->kind > WIRE_K_UNLINK) return WIRE_ETYPE;
 	if (!body_reply_ok(b->kind, b->reply != NULL)) return WIRE_ETYPE;
 	if (empty_body(b->kind) && b->payload_n) return WIRE_ETYPE;
 	if (!body_len_ok(b->kind, b->payload_n)) return WIRE_ELEN;
@@ -304,7 +304,7 @@ int wire_decode_body(const uint8_t *b, size_t n, struct wire_body *o)
 	if (has_reply) o->reply = rb(&r, WIRE_MSGID);
 	uint32_t plen = r32(&r);
 	if (r.bad) return WIRE_ETRUNC;
-	if (o->kind < WIRE_K_TEXT || o->kind > WIRE_K_HEAL) return WIRE_ETYPE;
+	if (o->kind < WIRE_K_TEXT || o->kind > WIRE_K_UNLINK) return WIRE_ETYPE;
 	if (!body_reply_ok(o->kind, o->reply != NULL)) return WIRE_ETYPE;
 	if (empty_body(o->kind) && plen) return WIRE_ETYPE;
 	if (!body_len_ok(o->kind, plen)) return WIRE_ELEN;

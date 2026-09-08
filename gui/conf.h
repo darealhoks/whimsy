@@ -8,6 +8,10 @@
 /* $XDG_CONFIG_HOME/whimsy/whimsy.conf, written in full with a comment per key on
  * first run; that file is the user docs. Reloaded live when its mtime moves. */
 
+#define CONF_BINDS 32
+
+#define REACT_SLOTS 3           /* emoji the hover strip offers */
+
 struct conf {
 	char path[512];
 	time_t mtime;
@@ -26,6 +30,11 @@ struct conf {
 
 	/* pane layout, written back by the gui as it is dragged and toggled */
 	double side_w, memb_w, side_open, memb_open;
+
+	/* `bind = <key> <command line>`; an empty cmd is `bind = <key>`, which kills the
+	   key, default handling included. not written back: conf_set is one line per key */
+	struct conf_bind { char key[24], cmd[192]; } bind[CONF_BINDS];
+	int nbind;
 };
 
 /* fills defaults, writes the default file when missing, then parses it */
@@ -34,7 +43,15 @@ void conf_load(struct conf *c, const char *path);
 int conf_reload(struct conf *c);
 
 /* #rrggbb into out; out keeps its value when v does not parse */
+int  conf_reacts_ok(const char *v);
 void conf_colour(uint8_t out[3], const char *v);
+
+/* ctrl+alt+shift order, lowercase, spaces dropped, enter/esc spelled as SDL names it.
+   0 when spec has no key name or does not fit */
+int conf_keyspec(const char *spec, char *out, size_t cap);
+/* the command bound to a normalised key spec, "" when the config unbinds it, NULL when
+   it carries no bind at all */
+const char *conf_bind(const struct conf *c, const char *key);
 
 /* the config keys, in the order the settings overlay lists them; NULL terminated */
 extern const char *const conf_keys[];

@@ -15,7 +15,11 @@
  * *out is malloc'd on success (0), untouched on failure (-1). */
 int img_shrink(const void *src, size_t n, size_t cap, void **out, size_t *out_n);
 
-/* the same, for an avatar: the centred square of src at px by px, jpeg under cap */
+/* the same, for an avatar: the square of src at sx, sy of side source px, scaled to
+ * px by px, jpeg under cap. side <= 0 takes the centred square; a rect off the edge is
+ * clamped back in */
+int img_avatar_rect(const void *src, size_t n, float sx, float sy, float side,
+                    int px, size_t cap, void **out, size_t *out_n);
 int img_avatar(const void *src, size_t n, int px, size_t cap, void **out, size_t *out_n);
 
 #endif
@@ -95,7 +99,8 @@ static int img_jpeg(unsigned char *px, int w, int h, size_t cap, void **out, siz
 	return 1;
 }
 
-int img_avatar(const void *src, size_t n, int px, size_t cap, void **out, size_t *out_n)
+int img_avatar_rect(const void *src, size_t n, float sx, float sy, float side,
+                    int px, size_t cap, void **out, size_t *out_n)
 {
 	int w, h, comp;
 	if (n > INT_MAX || px < 1) return -1;
@@ -103,10 +108,20 @@ int img_avatar(const void *src, size_t n, int px, size_t cap, void **out, size_t
 	if (!in) return -1;
 	if ((long long)w * h > IMG_MAX_PX) { free(in); return -1; }
 
-	int side = w < h ? w : h;
-	unsigned char *crop = in + ((h - side) / 2 * w + (w - side) / 2) * 3;
+	int max = w < h ? w : h;
+	int s = side > 0 ? (int)(side + 0.5f) : max, x, y;
+	if (s > max) s = max;
+	if (s < 1) s = 1;
+	x = side > 0 ? (int)(sx + 0.5f) : (w - s) / 2;
+	y = side > 0 ? (int)(sy + 0.5f) : (h - s) / 2;
+	if (x < 0) x = 0;
+	if (y < 0) y = 0;
+	if (x + s > w) x = w - s;
+	if (y + s > h) y = h - s;
+
+	unsigned char *crop = in + ((size_t)y * (size_t)w + (size_t)x) * 3;
 	unsigned char *small = malloc((size_t)px * (size_t)px * 3);
-	if (!small || !stbir_resize_uint8_srgb(crop, side, side, w * 3, small, px, px, px * 3,
+	if (!small || !stbir_resize_uint8_srgb(crop, s, s, w * 3, small, px, px, px * 3,
 	                                       STBIR_RGB)) {
 		free(small);
 		free(in);
@@ -116,6 +131,11 @@ int img_avatar(const void *src, size_t n, int px, size_t cap, void **out, size_t
 	int e = img_jpeg(small, px, px, cap, out, out_n);
 	free(small);
 	return e ? -1 : 0;
+}
+
+int img_avatar(const void *src, size_t n, int px, size_t cap, void **out, size_t *out_n)
+{
+	return img_avatar_rect(src, n, 0, 0, 0, px, cap, out, out_n);
 }
 
 int img_shrink(const void *src, size_t n, size_t cap, void **out, size_t *out_n)

@@ -41,8 +41,9 @@ _Static_assert(WHIMSY_FP_LEN == ID_FP_LEN, "fingerprint length must track identi
  *   SEEN      gid[16] | channel[2] | high-water[8], the newest one for a pair wins
  *   VERIFY    pk[32]; a fingerprint compared out of band, presence is the whole record
  *   MUTE      gid[16] | u8 on, the newest one for a group wins
- *   LINK      who[32] | other[32], one direction of a device link, authenticated when it
- *             was stored: ours, or one a GROUP blob's signature bound to who
+ *   LINK      who[32] | other[32] | u8 on, one direction of a device link, authenticated
+ *             when it was stored: ours, or one a GROUP blob's signature bound to who.
+ *             the newest one for a pair wins; without the byte it is an old record, an on
  *   AVATAR    pk[32] | encoded bytes; the newest one for a pk wins, empty clears. the
  *             previous one is voided, so an avatar replaced leaves the disk
  *   GAVATAR   gid[16] | encoded bytes, same rule; the group's, set by its owner
@@ -64,7 +65,7 @@ _Static_assert(WHIMSY_FP_LEN == ID_FP_LEN, "fingerprint length must track identi
 #define MSGFLAG (MSGIDX | MSGEDIT | MSGDEL)
 /* the kind shares the byte with those flags: a wire kind reaching MSGDEL would make
  * every record of that kind read as an old tombstone and vanish at the next open */
-_Static_assert(WIRE_K_HEAL < MSGDEL, "a wire kind past MSGDEL reads as an old tombstone");
+_Static_assert(WIRE_K_UNLINK < MSGDEL, "a wire kind past MSGDEL reads as an old tombstone");
 _Static_assert(WHIMSY_MSGID == WIRE_MSGID, "message id must be the wire's");
 _Static_assert(WHIMSY_MAX_REACT == WIRE_MAX_REACT, "the reaction cap must be the wire's");
 _Static_assert(WHIMSY_K_TEXT == WIRE_K_TEXT && WHIMSY_K_FILE == WIRE_K_FILE,
@@ -92,8 +93,9 @@ struct grp {
 	time_t asked, healed;           /* last heal sent from here, last one acted on for a member */
 	struct seenslot { uint16_t chan; uint64_t hw; size_t rec; } seen[WIRE_MAX_CHANNELS];
 	size_t nseen;
-	int muted;
+	int notify;                     /* enum whimsy_notify */
 	uint16_t evt[WIRE_MAX_CHANNELS];        /* channels that gained a message this poll */
+	uint8_t ment[WIRE_MAX_CHANNELS];        /* one of those messages named us */
 	size_t nevt;
 	uint16_t typed_ch;              /* the channel typed_at belongs to: a switch resets the limit */
 	time_t typed_at;                /* last typing blob sent from here */
@@ -251,6 +253,7 @@ int add_msg(struct whimsy *w, struct grp *gr, const uint8_t sender[32], uint64_t
                    uint16_t channel, uint8_t kind, uint32_t index, const uint8_t *reply,
                    const void *text, size_t n);
 int add_ver(struct whimsy *w, const uint8_t pk[WHIMSY_PK]);
+void del_ver(struct whimsy *w, const uint8_t pk[WHIMSY_PK]);
 int apply_change(struct whimsy *w, struct grp *gr, const uint8_t sender[32],
                         const uint8_t *id, const void *text, size_t n, int del);
 int apply_purge(struct whimsy *w, struct grp *gr, uint16_t channel, uint64_t before);
@@ -287,11 +290,13 @@ int idxv_add(struct idxv *v, size_t i);
 int load_group(struct whimsy *w, const uint8_t *b, size_t n, int *named);
 int map_group(int e);
 int map_store(int e);
-void note_event(struct grp *gr, uint16_t chan);
+void note_event(struct grp *gr, uint16_t chan, int mention);
+int names_us(const struct whimsy *w, const void *b, size_t n);
 void note_typer(struct whimsy *w, const uint8_t gid[WHIMSY_GID], uint16_t chan,
                        const uint8_t pk[WHIMSY_PK]);
 void prune_xfers(struct whimsy *w);
 int publish_links(struct whimsy *w, struct grp *gr);
+int revoke_link(struct whimsy *w, struct grp *gr, const uint8_t pk[WHIMSY_PK]);
 int push_avatars(struct whimsy *w);
 int push_msg(struct grp *gr, size_t idx);
 int push_out(struct whimsy *w, uint64_t id, const uint8_t gid[WHIMSY_GID],
@@ -303,6 +308,10 @@ int reseal(struct whimsy *w, struct grp *gr);
 int save_chunk(struct whimsy *w, const struct xfer *x, uint32_t idx,
                       const uint8_t *b, size_t n);
 int save_group(struct whimsy *w, const struct grp *gr);
+void del_link(struct whimsy *w, const uint8_t who[WHIMSY_PK],
+              const uint8_t other[WHIMSY_PK]);
+int drop_link(struct whimsy *w, const uint8_t who[WHIMSY_PK],
+              const uint8_t other[WHIMSY_PK]);
 int save_link(struct whimsy *w, const uint8_t who[WHIMSY_PK],
                      const uint8_t other[WHIMSY_PK]);
 int save_react(struct whimsy *w, const uint8_t gid[WHIMSY_GID], const uint8_t *id,

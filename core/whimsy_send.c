@@ -173,6 +173,15 @@ int heal_ask(struct whimsy *w, struct grp *gr)
 	return emit_out(w, gr, len, SIZE_MAX);
 }
 
+/* the revocation of one of those halves, into one group */
+int revoke_link(struct whimsy *w, struct grp *gr, const uint8_t pk[WHIMSY_PK])
+{
+	size_t len;
+	int e = emit_build(w, gr, gr->g.r.nchan ? gr->g.r.chan[0].id : 0, WIRE_K_UNLINK,
+	                   (uint64_t)time(NULL), NULL, pk, WHIMSY_PK, &len);
+	return e ? e : emit_out(w, gr, len, SIZE_MAX);
+}
+
 /* our half of every link, into one group: what a member who was not there when we
  * linked needs to merge our devices into one row */
 int publish_links(struct whimsy *w, struct grp *gr)

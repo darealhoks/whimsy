@@ -1,5 +1,7 @@
 #include "ui_int.h"
 
+#include <stdio.h>
+
 
 
 /* ---- settings ---- */
@@ -27,8 +29,10 @@ static const struct { const char *key, *desc; int kind, cat; } SET[] = {
 	{"pad",            "inset inside a pane",                           S_TEXT,   C_LOOK},
 	{"gap",            "space between rows",                            S_TEXT,   C_LOOK},
 	{"renderer",       "auto | software",                               S_TEXT,   C_LOOK},
-	{"reacts",         "the emoji the hover strip offers",              S_TEXT,   C_LOOK},
+	{"reacts",         "click a slot, then type or paste one emoji",     S_EMOJI,  C_LOOK},
 	{"confirm_delete", "ask before a delete goes through",              S_BOOL,   C_DO},
+	{"notify",         "command run on a new message: %g %c %s %t %a",   S_TEXT,   C_DO},
+	{"notify_group",   "the open group: all, mentions, none, mute",     S_CYCLE,  C_DO},
 };
 #define NSET ((int)(sizeof SET / sizeof *SET))
 
@@ -55,7 +59,9 @@ int set_kind(int i)
 static void set_val(struct ui *u, int i, char *v, size_t cap)
 {
 	v[0] = 0;
-	if (i < NSET) conf_getstr(u->c, SET[i].key, v, cap);
+	if (i < NSET && SET[i].kind == S_CYCLE)
+		snprintf(v, cap, "%s", notify_name(whimsy_notify_level(u->w, u->g)));
+	else if (i < NSET) conf_getstr(u->c, SET[i].key, v, cap);
 	else whimsy_get(u->w, i - NSET, v, cap);
 }
 
@@ -82,9 +88,30 @@ void set_edit(struct ui *u, int i)
 	memset(&u->set_f, 0, sizeof u->set_f);
 	field_insert(&u->set_f, v);
 	u->set_row = i;
+	u->set_slot = 0;
 	set_suggest(u);
 }
 
+
+/* replace the chosen slot and write the whole key back; a value the emoji check
+ * refuses never reaches conf */
+void set_slot_put(struct ui *u, const char *emoji)
+{
+	char out[sizeof ((struct conf *)0)->reacts], *p = out;
+	size_t left = sizeof out;
+	if (!conf_reacts_ok(emoji)) return;
+	for (int k = 0; k < REACT_SLOTS; k++) {
+		size_t n = 0;
+		const char *t = k == u->set_slot ? emoji : react_nth(u->c->reacts, k, &n);
+		if (k == u->set_slot) n = strlen(emoji);
+		if (!t) continue;
+		int w = snprintf(p, left, "%s%.*s", p == out ? "" : " ", (int)n, t);
+		if (w < 0 || (size_t)w >= left) return;
+		p += w;
+		left -= (size_t)w;
+	}
+	set_key(u, "reacts", out);
+}
 
 void set_apply(struct ui *u, const char *val)
 {
@@ -183,7 +210,19 @@ void settings(struct ui *u, float W, float H)
 			draw_rect(u->d, vx, y + 4 + (lh - 12) / 2, 16, 12, c->line, 90, 3);
 			nx = vx + 16 + c->gap;
 		}
-		if (kind == S_BOOL) {
+		if (kind == S_EMOJI) {
+			float bw2 = lh + 8;
+			for (int k = 0; k < REACT_SLOTS; k++, nx += bw2 + c->gap) {
+				size_t en = 0;
+				const char *em = react_nth(v, k, &en);
+				int on = i == u->set_row && k == u->set_slot;
+				draw_rect(u->d, nx, y + 2, bw2, bw2, on ? c->accent : c->line, on ? 255 : 120, 4);
+				draw_rect(u->d, nx + 1, y + 3, bw2 - 2, bw2 - 2, c->bg, 255, 3);
+				if (em) draw_text(u->d, nx + (bw2 - draw_measure(u->d, em, en, DRAW_REGULAR)) / 2,
+				                  y + 4, em, en, c->fg, DRAW_REGULAR);
+				hit_top(u, nx, y + 2, bw2, bw2, H_SLOT, (size_t)i, (size_t)k);
+			}
+		} else if (kind == S_BOOL) {
 			toggle(u, nx, y + 4 + (lh - 14) / 2, v[0] == '1');
 			nx += 26;
 		} else if (i == u->set_row) {

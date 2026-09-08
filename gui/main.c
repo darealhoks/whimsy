@@ -97,6 +97,41 @@ static int sock_read(int fd)
 	return b[0] == 'q' ? 'q' : 'r';
 }
 
+/* window points, the unit SDL_CreateWindow and SDL_GetWindowSize speak */
+static void geom_load(const char *dir, int *w, int *h)
+{
+	char p[544];
+	int a, b;
+	snprintf(p, sizeof p, "%s/window", dir);
+	FILE *f = fopen(p, "r");
+	if (!f) return;
+	if (fscanf(f, "%d %d", &a, &b) == 2 && a >= MIN_W && b >= MIN_H && a < 32000 && b < 32000) {
+		*w = a;
+		*h = b;
+	}
+	fclose(f);
+}
+
+static void geom_save(const char *dir, SDL_Window *win)
+{
+	char p[544];
+	int w = 0, h = 0;
+	if (!win || !SDL_GetWindowSize(win, &w, &h) || w < MIN_W || h < MIN_H) return;
+	snprintf(p, sizeof p, "%s/window", dir);
+	FILE *f = fopen(p, "w");
+	if (!f) return;
+	fprintf(f, "%d %d\n", w, h);
+	fclose(f);
+}
+
+/* the floor is logical px; points are what the window manager resizes in */
+static void min_size(SDL_Window *win, float scale)
+{
+	float k = SDL_GetWindowPixelDensity(win) / scale;
+	if (k <= 0) k = 1;
+	SDL_SetWindowMinimumSize(win, (int)(MIN_W / k), (int)(MIN_H / k));
+}
+
 enum screen { S_FIRST, S_UNLOCK, S_INVITE, S_READY };
 
 struct app {
@@ -381,7 +416,9 @@ int main(int argc, char **argv)
 	}
 	if (!strcmp(a.c.renderer, "software")) SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
 
-	a.win = SDL_CreateWindow("whimsy", 1280, 800,
+	int ww = 1280, wh = 800;
+	geom_load(dir, &ww, &wh);
+	a.win = SDL_CreateWindow("whimsy", ww, wh,
 	                         SDL_WINDOW_RESIZABLE | SDL_WINDOW_TRANSPARENT | SDL_WINDOW_HIGH_PIXEL_DENSITY);
 	if (!a.win) { fprintf(stderr, "window: %s\n", SDL_GetError()); ret = 1; goto done; }
 	a.r = SDL_CreateRenderer(a.win, NULL);
@@ -390,6 +427,7 @@ int main(int argc, char **argv)
 
 	float scale = SDL_GetWindowDisplayScale(a.win);
 	if (scale <= 0) scale = 1;
+	min_size(a.win, scale);
 	if (draw_open(&a.d, a.r, &a.c, scale)) {
 		fprintf(stderr, "no usable font: set `font` in %s\n", a.c.path);
 		ret = 1;
@@ -418,6 +456,7 @@ int main(int argc, char **argv)
 					ui_event(a.ui, &e, scale);
 					switch (ui_action(a.ui)) {
 					case UI_QUIT: run = 0; break;
+					case UI_HIDE: SDL_HideWindow(a.win); break;   /* still polling */
 					case UI_SERVER:
 						a.screen = S_INVITE;    /* the ui stays open behind it */
 						a.focus = 0;
@@ -477,13 +516,20 @@ int main(int argc, char **argv)
 		if (sfd >= 0) {
 			int said = sock_read(sfd);
 			if (said == 'q') run = 0;
-			if (said == 'r') { SDL_ShowWindow(a.win); SDL_RaiseWindow(a.win); dirty = 1; }
+			if (said == 'r') {
+				SDL_ShowWindow(a.win);
+				SDL_RaiseWindow(a.win);
+				/* raise is a request a wayland compositor may drop; the urgency hint is what
+				 * niri and friends act on */
+				SDL_FlashWindow(a.win, SDL_FLASH_UNTIL_FOCUSED);
+				dirty = 1;
+			}
 		}
 		if (a.screen == S_READY && ui_tick(a.ui)) dirty = 1;
 		if (conf_reload(&a.c)) { draw_reload(a.d, &a.c, scale); dirty = 1; }
 
 		float s = SDL_GetWindowDisplayScale(a.win);
-		if (s > 0 && s != scale) { scale = s; draw_reload(a.d, &a.c, scale); dirty = 1; }
+		if (s > 0 && s != scale) { scale = s; draw_reload(a.d, &a.c, scale); min_size(a.win, scale); dirty = 1; }
 
 		if (!dirty || (SDL_GetWindowFlags(a.win) & SDL_WINDOW_HIDDEN)) { dirty = 0; continue; }
 		dirty = 0;
@@ -498,6 +544,7 @@ int main(int argc, char **argv)
 	}
 
 done:
+	geom_save(dir, a.win);
 	if (sfd >= 0) { close(sfd); unlink(sock); }
 	if (lock >= 0) close(lock);
 	if (a.win) SDL_StopTextInput(a.win);

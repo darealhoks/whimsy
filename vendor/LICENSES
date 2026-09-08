@@ -2,7 +2,10 @@
 
     vendor/monocypher/   monocypher 4.0.2, verbatim. dual BSD-2-Clause / CC0-1.0,
                          full text in vendor/monocypher/LICENCE.md
+    vendor/dr/           dr_mp3 0.7.4, verbatim from https://github.com/mackron/dr_libs.
+                         dual public domain (Unlicense) / MIT-0, full text in the header's tail
     vendor/stb/          stb_image v2.30, stb_image_resize2 v2.18, stb_image_write v1.16,
+                         stb_vorbis v1.22,
                          verbatim from https://github.com/nothings/stb. dual MIT /
                          public domain (Unlicense), the same text in each header's tail:
 

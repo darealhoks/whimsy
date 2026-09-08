@@ -33,11 +33,14 @@
 #define SET_CATS 180           /* its category column, mockups/mockup.html .set */
 #define SET_FONTS 8             /* suggestion rows under a font field */
 #define SET_KEY 150            /* its key column */
+#define AVATAR_PX 64            /* .map/gui.md: avatars are 64 px, at most 8k */
 #define AVATARS 32              /* avatar textures held at once, least used dropped */
+#define LSPANS 512              /* text segments of one painted log frame, for selection */
 
 enum { H_GROUP = 1, H_CHAN, H_SIDE, H_MEMB, H_COMP, H_SDRAG, H_MDRAG,
        H_ACT, H_RCT, H_PILL, H_GOTO, H_PROF, H_CARD, H_CBTN, H_NEWPILL, H_ZOOM,
-       H_UNARM, H_SROW, H_SFONT, H_SCAT, H_LINK, H_SPOIL };
+       H_UNARM, H_SROW, H_SFONT, H_SCAT, H_LINK, H_SPOIL,
+       H_CDRAG, H_CZDRAG, H_COK, H_CCANCEL, H_SLOT, H_AUDIO, H_SEL };
 enum { A_REPLY = 1, A_EDIT, A_DEL, A_COPY, A_SAVE, A_FCOPY };
 /* what a click armed the composer with; the bar above the composer names it */
 enum { M_NONE, M_REPLY, M_EDIT, M_DEL };
@@ -47,6 +50,9 @@ static const uint8_t ok_col[3]  = {143, 181, 154};
 static const uint8_t bad_col[3] = {192, 138, 142};
 
 struct hit { float x, y, w, h; int kind; size_t a, b; };
+/* one styled run of one wrapped log line, as it was painted: the log selection maps a
+ * pointer back to a byte of m.text through these */
+struct lspan { size_t row, at, len; float x, y, w, h; int font; };
 
 struct ui {
 	struct whimsy *w;
@@ -74,7 +80,16 @@ struct ui {
 	int ask_typing;                 /* the consent question is standing */
 	int over;                       /* OV_IMAGE or OV_TEXT, on row over_i */
 	size_t over_i;
-	int dialog;                     /* 1 picking a file to send, 2 picking where to save */
+	int dialog;                     /* 1 a file to send, 2 where to save, 3 an avatar */
+	/* the avatar crop screen: the picked picture while it stands. offsets are in
+	 * radii, so the circle can be any size the window allows */
+	SDL_Texture *cr_t, *cr_dst;
+	char cr_path[512];
+	int cr_w, cr_h;                 /* the picture's decoded size */
+	int cr_grp;                     /* the group's avatar, not ours */
+	int cr_drag;                    /* 1 panning the picture, 2 on the slider */
+	float cr_zoom, cr_ox, cr_oy;
+	float cr_r, cr_sx, cr_sw;       /* last painted circle and slider, for a drag */
 	int set_open;                   /* the settings screen, drawn instead of the panes */
 	int set_row;                    /* the row it is editing in place, -1 for none */
 	int set_cat;                    /* the category column's selection */
@@ -94,6 +109,9 @@ struct ui {
 	struct field comp;
 	size_t cstart[MAXWRAP + 2];     /* composer line starts, from the last paint */
 	int cnl, ctop;                  /* wrapped lines, first one shown */
+	float comp_x, comp_y, comp_lh;  /* composer text origin, for a click to caret */
+	int clicks;                     /* the click count the last press carried */
+	uint64_t blink;                 /* ticks of the last edit: the caret is solid first */
 	char err[128];
 
 	int pop_sel;                    /* highlighted popup row */
@@ -116,6 +134,17 @@ struct ui {
 	struct hit hit[256];
 	int nhit;
 
+	struct lspan lspan[LSPANS];
+	int nlspan;
+	size_t sa_row, sa_off, sb_row, sb_off;  /* log selection: anchor, then head */
+	int lsel;
+
+	int set_slot;                   /* the emoji slot being replaced on an S_EMOJI row */
+
+	int strip_on;                   /* the hover strip, painted after every row */
+	size_t strip_i;
+	float strip_x, strip_y;          /* its right edge and text baseline top */
+
 	uint64_t next_poll, next_dial;
 	unsigned backoff;               /* seconds, 1 2 4 8 ... 32 */
 	int neterr;                     /* last dial or poll failure, shown beside `offline` */
@@ -134,11 +163,16 @@ void ui_err(struct ui *u, const char *fmt, ...);
 int exec(struct ui *u, const char *line);
 void file_overlay(struct ui *u, float W, float H);
 void hit(struct ui *u, float x, float y, float w, float h, int kind, size_t a, size_t b);
+/* the same, first in the list: what floats over a row must win the click */
+void hit_top(struct ui *u, float x, float y, float w, float h, int kind, size_t a, size_t b);
 void idcol(struct ui *u, const uint8_t pk[WHIMSY_PK], uint8_t out[3]);
 void invalidate(struct ui *u);
 int is_dm(struct ui *u, size_t g);
 void log_pane(struct ui *u, float x, float y, float w, float h);
+void log_sel_at(struct ui *u, float mx, float my, size_t *row, size_t *off);
+int log_sel_copy(struct ui *u);
 const char *mime_of(const char *name);
+int img_mime(const char *name);
 const char *mode_tag(const struct ui *u);
 const uint8_t *peer(struct ui *u, size_t g);
 float popup(struct ui *u, float x, float bottom, float w);
@@ -148,13 +182,22 @@ float row_height(struct ui *u, size_t i, float bw);
 void row_title(struct ui *u, size_t g, char *out, size_t cap);
 void select_group(struct ui *u, size_t g, size_t ch);
 void settings(struct ui *u, float W, float H);
+void crop_open(struct ui *u, const char *path, int grp);
+void crop_close(struct ui *u);
+void crop_paint(struct ui *u, float W, float H);
+int  crop_event(struct ui *u, const SDL_Event *e, float scale);
 SDL_Texture *tex_for(struct ui *u, size_t i, const uint8_t *b, size_t n, float maxw, float *w, float *h);
 
 void paste_clean(struct ui *u);
 void clip_bytes(struct ui *u, const void *b, size_t n, const char *mime);
 void clip_set(const char *s, size_t n);
 void complete(struct ui *u);
+int ment_list(struct ui *u, char buf[][64], const char *cand[], const char **word, size_t *wn);
+int ment_open(struct ui *u);
+const char *notify_name(int lv);
+int notify_next(int lv);
 void comp_step_line(struct ui *u, int delta);
+size_t comp_at(struct ui *u, float mx, float my);
 void del_answer(struct ui *u, char k);
 int done(struct ui *u, int e);
 int open_dm(struct ui *u, const uint8_t pk[WHIMSY_PK]);
@@ -163,13 +206,14 @@ void run_line(struct ui *u);
 void ui_send(struct ui *u);
 void set_apply(struct ui *u, const char *val);
 void set_edit(struct ui *u, int i);
+void set_slot_put(struct ui *u, const char *emoji);
 int set_kind(int i);
 int set_on(struct ui *u, int i);
 void set_suggest(struct ui *u);
 void typed(struct ui *u);
 int yes(const char *s);
 
-enum { S_TEXT, S_BOOL, S_COLOUR, S_FONT };
+enum { S_TEXT, S_BOOL, S_COLOUR, S_FONT, S_CYCLE, S_EMOJI };
 
 void scroll_to(struct ui *u, size_t i);
 void run_cmd(struct ui *u, const char *line);
