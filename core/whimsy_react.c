@@ -1,9 +1,9 @@
 #include "int.h"
+#include "plat.h"
 
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 /* reactions */
@@ -542,7 +542,7 @@ static size_t clean_name(char *out, size_t cap, const void *in, size_t n)
 
 static int write_new(const char *path, const uint8_t *b, size_t n)
 {
-	int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	int fd = plat_open(path, O_WRONLY | O_CREAT | O_EXCL | PLAT_PRIVATE);
 	if (fd < 0) return WHIMSY_EIO;
 	for (size_t o = 0; o < n; ) {
 		ssize_t k = write(fd, b + o, n - o);
@@ -561,7 +561,7 @@ static void autosave(struct whimsy *w, const struct xfer *x)
 	whimsy_get(w, WHIMSY_FILE_AUTOSAVE, name, sizeof name);
 	if (name[0] != '1') return;
 	if (snprintf(dir, sizeof dir, "%s/files", w->dir) >= (int)sizeof dir) return;
-	mkdir(dir, 0700);
+	plat_mkdir(dir);
 	struct whimsy_msg m;
 	size_t g = 0;
 	for (; g < w->ng; g++) if (wc_equal(w->g[g]->g.id, x->gid, WHIMSY_GID)) break;
@@ -611,12 +611,15 @@ int whimsy_send_file(struct whimsy *w, size_t g, uint16_t channel, const char *p
 	if (!chan_known(w->g[g], channel)) return WHIMSY_EARG;
 	struct grp *gr = w->g[g];
 
-	int fd = open(path, O_RDONLY);
+	int fd = plat_open(path, O_RDONLY);
 	if (fd < 0) return WHIMSY_EIO;
-	struct stat st;
-	if (fstat(fd, &st) || !S_ISREG(st.st_mode) || !st.st_size ||
-	    st.st_size > WHIMSY_MAX_FILE) { close(fd); return st.st_size > WHIMSY_MAX_FILE ? WHIMSY_EARG : WHIMSY_EIO; }
-	size_t n = (size_t)st.st_size;
+	long long sz = 0;
+	int wr;    /* an attachment we read out: world-readable is fine */
+	if (plat_is_regular_private(fd, &sz, &wr) || !sz || sz > WHIMSY_MAX_FILE) {
+		close(fd);
+		return sz > WHIMSY_MAX_FILE ? WHIMSY_EARG : WHIMSY_EIO;
+	}
+	size_t n = (size_t)sz;
 	uint8_t *b = malloc(n);
 	if (!b) { close(fd); return WHIMSY_ENOMEM; }
 	for (size_t o = 0; o < n; ) {

@@ -1,14 +1,28 @@
 #include "net.h"
 
 #include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+
+#include <ws2tcpip.h>
+#define close(fd)        closesocket(fd)
+#define sk_read(f, b, n)  recv((f), (char *)(b), (int)(n), 0)
+#define sk_write(f, b, n) send((f), (const char *)(b), (int)(n), 0)
+#define SK_EINTR         (WSAGetLastError() == WSAEINTR)
+#else
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#define sk_read(f, b, n)  read((f), (b), (n))
+#define sk_write(f, b, n) write((f), (b), (n))
+#define SK_EINTR         (errno == EINTR)
+#endif
 
 #include "crypto.h"
 
@@ -24,8 +38,8 @@ static int wr_all(int fd, const void *p, size_t n)
 {
 	const uint8_t *b = p;
 	while (n) {
-		ssize_t w = write(fd, b, n);
-		if (w < 0 && errno == EINTR) continue;
+		ssize_t w = sk_write(fd, b, n);
+		if (w < 0 && SK_EINTR) continue;
 		if (w <= 0) return NET_EIO;
 		b += w;
 		n -= (size_t)w;
@@ -37,8 +51,8 @@ static int rd_all(int fd, void *p, size_t n)
 {
 	uint8_t *b = p;
 	while (n) {
-		ssize_t r = read(fd, b, n);
-		if (r < 0 && errno == EINTR) continue;
+		ssize_t r = sk_read(fd, b, n);
+		if (r < 0 && SK_EINTR) continue;
 		if (r <= 0) return NET_EIO;
 		b += r;
 		n -= (size_t)r;
@@ -70,6 +84,12 @@ static int dial(struct net *n)
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
 	n->fd = -1; /* before any early return: net_close would otherwise close fd 0 */
+#ifdef _WIN32
+	static WSADATA wsa;     /* winsock stays loaded for the process; no matching cleanup */
+	static int wsa_up;
+	if (!wsa_up && WSAStartup(MAKEWORD(2, 2), &wsa)) return NET_ECONN;
+	wsa_up = 1;
+#endif
 	if (getaddrinfo(n->host, n->port, &hints, &res)) return NET_ECONN;
 
 	for (a = res; a; a = a->ai_next) {
@@ -77,15 +97,21 @@ static int dial(struct net *n)
 		if (fd < 0) continue;
 		/* bounds connect and every later read: a silently dropped peer costs one NET_TIMEOUT,
 		 * not a hung client. linux honours SO_SNDTIMEO for connect(2) */
+#ifdef _WIN32
+		/* winsock takes a DWORD of milliseconds here, not a timeval, and ignores
+		 * SO_SNDTIMEO for connect: a dead peer costs the tcp default, not NET_TIMEOUT */
+		DWORD tv = NET_TIMEOUT * 1000;
+#else
 		struct timeval tv = { NET_TIMEOUT, 0 };
-		setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-		setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+#endif
+		setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char *)&tv, sizeof tv);
+		setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
 		if (!connect(fd, a->ai_addr, a->ai_addrlen)) { n->fd = fd; break; }
 		close(fd);
 	}
 	freeaddrinfo(res);
 	if (n->fd < 0) return NET_ECONN;
-	setsockopt(n->fd, IPPROTO_TCP, TCP_NODELAY, &(int){ 1 }, sizeof(int));
+	setsockopt(n->fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&(int){ 1 }, sizeof(int));
 
 	uint8_t m1[NOISE_MSG1], m2[NOISE_MSG2];
 	int r = noise_client_hello(&n->ns, n->sk, n->pk, n->spk, m1);

@@ -3,10 +3,22 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+
+#include <bcrypt.h>
+#else
 #include <sys/random.h>
+#endif
 
 #include "monocypher.h"
 
+#ifdef _WIN32
+void wc_random(void *out, size_t n)
+{
+	if (BCryptGenRandom(NULL, out, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG)) abort();
+}
+#else
 void wc_random(void *out, size_t n)
 {
 	uint8_t *p = out;
@@ -17,6 +29,7 @@ void wc_random(void *out, size_t n)
 		n -= (size_t)r;
 	}
 }
+#endif
 
 void wc_wipe(void *p, size_t n) { crypto_wipe(p, n); }
 

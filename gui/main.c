@@ -8,13 +8,31 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+
+#include <afunix.h>     /* af_unix in winsock, windows 10 1803 and up */
+#include <io.h>
+#include <windows.h>
+#define close(fd)         closesocket(fd)
+#define sk_write(f, b, n) send((f), (b), (int)(n), 0)
+#define sk_read(f, b, n)  recv((f), (b), (int)(n), 0)
+static int nonblock(int fd) { u_long on = 1; return ioctlsocket(fd, FIONBIO, &on); }
+#define close_fd(fd)      _close(fd)
+#else
 #include <sys/file.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#define sk_write(f, b, n) write((f), (b), (n))
+#define sk_read(f, b, n)  read((f), (b), (n))
+#define close_fd(fd)      close(fd)
+#endif
 
 #include "conf.h"
+#include "plat.h"
 #include "draw.h"
 #include "field.h"
 #include "ui.h"
@@ -28,6 +46,14 @@
  * window a `close = hide` left running, `whimsy quit` ends it. no tray */
 static int sock_path(char *out, size_t cap)
 {
+#ifdef _WIN32
+	const char *app = getenv("LOCALAPPDATA");
+	if (!app || !*app) return 0;
+	char d[512];
+	if (snprintf(d, sizeof d, "%s\\whimsy", app) >= (int)sizeof d) return 0;
+	plat_mkdir(d);
+	return snprintf(out, cap, "%s\\whimsy.sock", d) < (int)cap;
+#else
 	const char *run = getenv("XDG_RUNTIME_DIR");
 	if (run && *run) return snprintf(out, cap, "%s/whimsy.sock", run) < (int)cap;
 
@@ -39,6 +65,7 @@ static int sock_path(char *out, size_t cap)
 	if (lstat(dir, &st) || !S_ISDIR(st.st_mode) || st.st_uid != getuid() ||
 	    (st.st_mode & 077)) return 0;
 	return snprintf(out, cap, "%s/whimsy.sock", dir) < (int)cap;
+#endif
 }
 
 static void sock_addr(struct sockaddr_un *a, const char *path)
@@ -56,7 +83,7 @@ static int sock_tell(const char *path, const char *word)
 	if (fd < 0) return 0;
 	sock_addr(&a, path);
 	if (connect(fd, (struct sockaddr *)&a, sizeof a)) { close(fd); return 0; }
-	ssize_t k = write(fd, word, strlen(word));
+	ssize_t k = sk_write(fd, word, strlen(word));
 	close(fd);
 	return k > 0;
 }
@@ -68,9 +95,27 @@ static int sock_listen(const char *path, int *lock)
 	struct sockaddr_un a;
 	char lp[sizeof a.sun_path + 8];
 	snprintf(lp, sizeof lp, "%s.lock", path);
+#ifdef _WIN32
+	/* an unshared handle is the lock: windows releases it on close or on a crash, the way
+	 * flock does. no CloseHandle here, main closes *lock */
+	HANDLE h = CreateFileA(lp, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
+	                       FILE_ATTRIBUTE_NORMAL, NULL);
+	if (h == INVALID_HANDLE_VALUE) return -1;
+	*lock = _open_osfhandle((intptr_t)h, 0);
+	if (*lock < 0) { CloseHandle(h); return -1; }
+	/* every later failure leaves *lock set: main closes it */
+
+	int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0) return -1;
+	if (nonblock(fd)) { close(fd); return -1; }
+	_unlink(path);          /* winsock will not bind over an existing socket file either */
+	sock_addr(&a, path);
+	if (bind(fd, (struct sockaddr *)&a, sizeof a) || listen(fd, 4)) { close(fd); return -1; }
+	return fd;
+#else
 	*lock = open(lp, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
 	if (*lock < 0) return -1;
-	if (flock(*lock, LOCK_EX | LOCK_NB)) { close(*lock); *lock = -1; return -1; }
+	if (flock(*lock, LOCK_EX | LOCK_NB)) { close_fd(*lock); *lock = -1; return -1; }
 
 	int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
 	if (fd < 0) return -1;
@@ -81,6 +126,7 @@ static int sock_listen(const char *path, int *lock)
 	umask(um);
 	if (e) { close(fd); return -1; }
 	return fd;
+#endif
 }
 
 /* 'r' raise, 'q' quit, 0 nothing said. nonblocking: this runs on the main loop, so a peer
@@ -88,9 +134,15 @@ static int sock_listen(const char *path, int *lock)
 static int sock_read(int fd)
 {
 	char b[16];
+#ifdef _WIN32
+	int c = accept(fd, NULL, NULL);
+	if (c < 0) return 0;
+	nonblock(c);
+#else
 	int c = accept4(fd, NULL, NULL, SOCK_NONBLOCK);
 	if (c < 0) return 0;
-	ssize_t n = read(c, b, sizeof b - 1);
+#endif
+	ssize_t n = sk_read(c, b, sizeof b - 1);
 	close(c);
 	if (n <= 0) return 0;
 	b[n] = 0;
@@ -380,11 +432,18 @@ int main(int argc, char **argv)
 	char dir[512], cfg[512], sock[sizeof ((struct sockaddr_un *)0)->sun_path];
 	const char *tell = "raise";
 	int sfd = -1, lock = -1, ret = 0;
+#ifdef _WIN32
+	const char *app = getenv("APPDATA");
+	if (!app || !*app) app = ".";
+	snprintf(dir, sizeof dir, "%s\\whimsy", app);
+	snprintf(cfg, sizeof cfg, "%s\\whimsy\\whimsy.conf", app);
+#else
 	const char *home = getenv("HOME"), *xdg;
 	if ((xdg = getenv("XDG_DATA_HOME")) && *xdg) snprintf(dir, sizeof dir, "%s/whimsy", xdg);
 	else snprintf(dir, sizeof dir, "%s/.local/share/whimsy", home ? home : ".");
 	if ((xdg = getenv("XDG_CONFIG_HOME")) && *xdg) snprintf(cfg, sizeof cfg, "%s/whimsy/whimsy.conf", xdg);
 	else snprintf(cfg, sizeof cfg, "%s/.config/whimsy/whimsy.conf", home ? home : ".");
+#endif
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "quit")) tell = "quit";
@@ -393,6 +452,10 @@ int main(int argc, char **argv)
 		else usage();
 	}
 	a.dir = dir;
+#ifdef _WIN32
+	WSADATA wsa;    /* before sock_tell: winsock socket() fails until this runs */
+	if (WSAStartup(MAKEWORD(2, 2), &wsa)) return 1;
+#endif
 	if (!sock_path(sock, sizeof sock)) {
 		fprintf(stderr, "no usable ipc socket path\n");
 		return 1;
@@ -546,7 +609,7 @@ int main(int argc, char **argv)
 done:
 	geom_save(dir, a.win);
 	if (sfd >= 0) { close(sfd); unlink(sock); }
-	if (lock >= 0) close(lock);
+	if (lock >= 0) close_fd(lock);
 	if (a.win) SDL_StopTextInput(a.win);
 	ui_close(a.ui);
 	draw_close(a.d);

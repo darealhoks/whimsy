@@ -9,6 +9,17 @@ CFLAGS += -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong -fPIE
 LDFLAGS += -pie -Wl,-z,relro,-z,now
 endif
 
+# windows cross build: make win. the sysroot comes from vendor/win/fetch.sh
+ifeq ($(MAKECMDGOALS),win)
+CC := x86_64-w64-mingw32-gcc
+MODE := win
+export PKG_CONFIG_LIBDIR := $(CURDIR)/vendor/win/prefix/lib/pkgconfig
+CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -Icore -Ivendor/monocypher -Ivendor/stb -Ivendor/dr -D_USE_MATH_DEFINES \
+          -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong
+LDFLAGS := -mwindows -Wl,--dynamicbase,--nxcompat,--high-entropy-va
+WIN_LIBS := -lbcrypt -lws2_32 -ladvapi32
+endif
+
 MONO := vendor/monocypher/monocypher.c
 CORE := $(wildcard core/*.c) $(MONO)
 GUI := $(wildcard gui/*.c)
@@ -26,7 +37,15 @@ all: $(BIN)/libwhimsy.a $(if $(wildcard server/*.c),$(BIN)/whimsyd) $(if $(HAVE_
 
 $(BIN)/whimsy: $(GUI) $(BIN)/libwhimsy.a
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) $(GUI_INC) $(GUI_CFLAGS) $(LDFLAGS) -o $@ $(GUI) $(BIN)/libwhimsy.a $(GUI_LIBS) -lm
+	$(CC) $(CFLAGS) $(GUI_INC) $(GUI_CFLAGS) $(LDFLAGS) -o $@ $(GUI) $(BIN)/libwhimsy.a $(GUI_LIBS) $(WIN_LIBS) -lm
+
+# no whimsyd: the relay is linux-only (epoll)
+win: $(BIN)/whimsy.exe
+	@cp vendor/win/prefix/bin/*.dll $(BIN)/
+
+$(BIN)/whimsy.exe: $(GUI) $(BIN)/libwhimsy.a
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) $(GUI_INC) $(GUI_CFLAGS) $(LDFLAGS) -o $@ $(GUI) $(BIN)/libwhimsy.a $(GUI_LIBS) $(WIN_LIBS) -lm
 
 $(BIN)/libwhimsy.a: $(CORE:%.c=$(BIN)/%.o)
 	@mkdir -p $(@D)
@@ -59,4 +78,4 @@ fuzz: $(CORE)
 clean:
 	rm -rf build
 
-.PHONY: all test fuzz clean
+.PHONY: all test fuzz clean win

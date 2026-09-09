@@ -1,10 +1,7 @@
 #include "int.h"
 
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 /* snprintf-style truncation, defined with the other string helpers below */
 size_t term(char *out, size_t cap, size_t w);

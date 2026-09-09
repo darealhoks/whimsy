@@ -1,5 +1,7 @@
 #include "conf.h"
 
+#include "plat.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -281,7 +283,7 @@ static void mkparents(const char *path)
 	char buf[512];
 	snprintf(buf, sizeof buf, "%s", path);
 	for (char *p = buf + 1; *p; p++)
-		if (*p == '/') { *p = 0; mkdir(buf, 0700); *p = '/'; }
+		if (*p == '/' || *p == '\\') { char c = *p; *p = 0; plat_mkdir(buf); *p = c; }
 }
 
 void conf_load(struct conf *c, const char *path)

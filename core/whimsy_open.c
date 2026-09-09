@@ -1,10 +1,7 @@
 #include "int.h"
 
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/stat.h>
-#include <unistd.h>
 /* notifications */
 
 void note_event(struct grp *gr, uint16_t chan, int mention)

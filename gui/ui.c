@@ -1,3 +1,8 @@
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#include "plat.h"
 #include "ui_int.h"
 
 #include "audio.h"
@@ -151,7 +156,11 @@ void typed(struct ui *u)
 static void avatar_path(struct ui *u, const uint8_t *pk, char *out, size_t cap)
 {
 	char dir[512], hex[2 * WHIMSY_PK + 1];
+#ifdef _WIN32
+	const char *xdg = getenv("LOCALAPPDATA"), *home = NULL;
+#else
 	const char *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
+#endif
 	size_t n = 0;
 	const uint8_t *b;
 
@@ -161,7 +170,7 @@ static void avatar_path(struct ui *u, const uint8_t *pk, char *out, size_t cap)
 	if (!b || !n) return;
 	if (xdg && *xdg) snprintf(dir, sizeof dir, "%s/whimsy", xdg);
 	else snprintf(dir, sizeof dir, "%s/.cache/whimsy", home ? home : "/tmp");
-	if (mkdir(dir, 0700) && errno != EEXIST) return;
+	if (plat_mkdir(dir) && errno != EEXIST) return;
 	whimsy_pk_hex(hex, pk);
 	snprintf(out, cap, "%s/%s.img", dir, hex);
 	if (!SDL_SaveFile(out, b, n)) out[0] = 0;
@@ -182,6 +191,32 @@ static void expand(const char *in, size_t n, char *out, size_t cap,
 	}
 	out[o] = 0;
 }
+
+#ifdef _WIN32
+/* CreateProcess splits the command line again, so a word that reached us as message text has
+ * to be quoted back into one argument: msvcrt rule, a backslash run doubles only when a quote
+ * follows it. appends the word and a separator; 0 if it would not fit */
+static int win_quote(char *out, size_t cap, size_t *at, const char *s)
+{
+	size_t o = *at, nb = 0, i;
+#define PUT(c) do { if (o + 1 >= cap) return 0; out[o++] = (char)(c); } while (0)
+	PUT('"');
+	for (; *s; s++) {
+		if (*s == '\\') { nb++; continue; }
+		if (*s == '"') { for (i = 0; i < nb; i++) { PUT('\\'); PUT('\\'); } PUT('\\'); }
+		else for (i = 0; i < nb; i++) PUT('\\');
+		nb = 0;
+		PUT(*s);
+	}
+	for (i = 0; i < nb; i++) { PUT('\\'); PUT('\\'); }
+	PUT('"');
+	PUT(' ');
+#undef PUT
+	out[o] = 0;
+	*at = o;
+	return 1;
+}
+#endif
 
 /* the command from the config, split on spaces with "..." and '...' kept together, the
  * %-codes filled in per word after the split: a value never re-splits and never sees a
@@ -215,11 +250,29 @@ static void run_notify(struct ui *u, const char *const val[128])
 	}
 	if (!nw) return;
 	argv[nw] = NULL;
+#ifdef _WIN32
+	/* cmd.exe re-parses its own command line, so no quoting here can keep a message-derived
+	 * word from becoming a metacharacter. refuse rather than hand it one */
+	size_t l0 = strlen(argv[0]);
+	if (l0 > 4 && (!_stricmp(argv[0] + l0 - 4, ".bat") || !_stricmp(argv[0] + l0 - 4, ".cmd"))) return;
+	char cmd[1024];
+	size_t at = 0;
+	for (int i = 0; i < nw; i++)
+		if (!win_quote(cmd, sizeof cmd, &at, argv[i])) return;
+	STARTUPINFOA si = { 0 };
+	si.cb = sizeof si;
+	PROCESS_INFORMATION pi;
+	if (CreateProcessA(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+		CloseHandle(pi.hProcess);      /* no wait: the command reaps itself, as on posix */
+		CloseHandle(pi.hThread);
+	}
+#else
 	pid_t pid = fork();
 	if (pid == 0) {
 		execvp(argv[0], argv);
 		_exit(127);
 	}
+#endif
 }
 
 /* whimsy_events after a poll: one run of the notify command per group and channel that
@@ -328,7 +381,9 @@ int ui_open(struct ui **out, struct whimsy *w, struct draw *d, struct conf *c, S
 	u->memb_open = c->memb_open != 0;
 	u->scale = 1;
 	u->fat = u->act_i = u->newat = u->spoil = (size_t)-1;
+#ifndef _WIN32
 	signal(SIGCHLD, SIG_IGN);       /* the notify command reaps itself */
+#endif
 	whimsy_self(w, u->self);
 	invalidate(u);
 	*out = u;

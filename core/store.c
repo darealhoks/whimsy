@@ -5,10 +5,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include "crypto.h"
+#include "plat.h"
 
 #define RECHDR (4 + WC_NONCE)
 #define MAGIC  "whimsy"
@@ -64,16 +64,17 @@ static int path_of(char *out, size_t cap, const char *dir, const char *leaf)
 }
 
 /* reads the file whole; -1 on any error, *out NULL for a missing file */
-static int read_all(const char *path, uint8_t **out, size_t *out_n, mode_t *mode)
+static int read_all(const char *path, uint8_t **out, size_t *out_n, int *world_readable)
 {
 	*out = NULL;
 	*out_n = 0;
-	int fd = open(path, O_RDONLY | O_NOFOLLOW);
+	int fd = plat_open(path, O_RDONLY | PLAT_NOFOLLOW);
 	if (fd < 0) return errno == ENOENT ? 0 : -1;
-	struct stat st;
-	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode) || st.st_size < 0) { close(fd); return -1; }
-	if (mode) *mode = st.st_mode;
-	size_t n = (size_t)st.st_size;
+	long long sz;
+	int wr;
+	if (plat_is_regular_private(fd, &sz, &wr) < 0) { close(fd); return -1; }
+	if (world_readable) *world_readable = wr;
+	size_t n = (size_t)sz;
 	uint8_t *b = malloc(n ? n : 1);
 	if (!b) { close(fd); return -1; }
 	for (size_t got = 0; got < n; ) {
@@ -107,18 +108,18 @@ static int keyfile(uint8_t key[32], const char *dir)
 	if (path_of(path, sizeof path, dir, "key")) return STORE_EIO;
 	uint8_t *b;
 	size_t n;
-	mode_t mode = 0;
-	if (read_all(path, &b, &n, &mode)) return STORE_EIO;
+	int world_readable = 1;
+	if (read_all(path, &b, &n, &world_readable)) return STORE_EIO;
 	if (b) {
-		int e = n == 32 && !(mode & 077) ? (memcpy(key, b, 32), STORE_OK) : STORE_EKEY;
+		int e = n == 32 && !world_readable ? (memcpy(key, b, 32), STORE_OK) : STORE_EKEY;
 		wc_wipe(b, n);
 		free(b);
 		return e;
 	}
 	wc_random(key, 32);
-	int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+	int fd = plat_open(path, O_WRONLY | O_CREAT | O_EXCL | PLAT_PRIVATE);
 	if (fd < 0) return STORE_EIO;
-	int e = write_all(fd, key, 32) || fsync(fd) ? STORE_EIO : STORE_OK;
+	int e = write_all(fd, key, 32) || plat_fsync(fd) ? STORE_EIO : STORE_OK;
 	close(fd);
 	return e;
 }
@@ -143,15 +144,6 @@ static void hdr_mac(uint8_t mac[16], const uint8_t key[32], const uint8_t hdr[ST
 	wc_seal(mac, key, hdr + HDR_NONCE, hdr, HDR_NONCE, NULL, 0);
 }
 
-/* a rename or a create is only durable once the directory entry is */
-static void sync_dir(const char *dir)
-{
-	int fd = open(dir, O_RDONLY | O_DIRECTORY);
-	if (fd < 0) return;
-	fsync(fd);
-	close(fd);
-}
-
 /* the record is durable before this runs, so a header left behind is survivable:
  * store_open takes count as a lower bound. losing it the other way is not */
 static void sync_hdr(struct store *s)
@@ -160,7 +152,7 @@ static void sync_hdr(struct store *s)
 	wc_random(s->hdr + HDR_NONCE, WC_NONCE);
 	hdr_mac(s->hdr + HDR_MAC, s->key, s->hdr);
 	for (size_t at = 0; at < STORE_HDR; ) {
-		ssize_t w = pwrite(s->fd, s->hdr + at, STORE_HDR - at, (off_t)at);
+		long long w = plat_pwrite(s->fd, s->hdr + at, STORE_HDR - at, (long long)at);
 		if (w < 0 && errno == EINTR) continue;
 		if (w <= 0) return;
 		at += (size_t)w;
@@ -227,7 +219,7 @@ int store_open(struct store **out, const char *dir, const char *pass, size_t *ba
 {
 	if (pass && !*pass) pass = NULL;        /* empty is no passphrase: fall to the keyfile */
 	*out = NULL;
-	if (mkdir(dir, 0700) && errno != EEXIST) return STORE_EIO;
+	if (plat_mkdir(dir) && errno != EEXIST) return STORE_EIO;
 
 	char path[4096];
 	if (path_of(path, sizeof path, dir, "store")) return STORE_EIO;
@@ -259,12 +251,12 @@ int store_open(struct store **out, const char *dir, const char *pass, size_t *ba
 		e = derive(s->key, hdr, dir, pass);
 		if (!e) {
 			hdr_mac(hdr + HDR_MAC, s->key, hdr);
-			int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
+			int fd = plat_open(path, O_WRONLY | O_CREAT | O_TRUNC | PLAT_NOFOLLOW | PLAT_PRIVATE);
 			if (fd < 0) e = STORE_EIO;
 			else {
-				e = write_all(fd, hdr, STORE_HDR) || fsync(fd) ? STORE_EIO : STORE_OK;
+				e = write_all(fd, hdr, STORE_HDR) || plat_fsync(fd) ? STORE_EIO : STORE_OK;
 				close(fd);
-				if (!e) sync_dir(dir);
+				if (!e) plat_sync_dir(dir);
 			}
 		}
 	} else if (n < STORE_HDR || memcmp(b, MAGIC, MAGIC_N) || b[6] != STORE_VER) {
@@ -292,7 +284,7 @@ int store_open(struct store **out, const char *dir, const char *pass, size_t *ba
 	if (b) { wc_wipe(b, n); free(b); }
 	if (!e) {
 		/* no O_APPEND: sync_hdr pwrites offset 0, which O_APPEND would send to the end */
-		s->fd = open(path, O_WRONLY | O_NOFOLLOW);
+		s->fd = plat_open(path, O_WRONLY | PLAT_NOFOLLOW);
 		if (s->fd < 0) e = STORE_EIO;
 	}
 	if (e) { store_close(s); return e; }
@@ -332,7 +324,7 @@ int store_append(struct store *s, uint8_t kind, const void *rec, size_t n)
 	seal_rec(buf, s->key, s->nrec - 1, kind, rec, n);
 
 	off_t at = lseek(s->fd, 0, SEEK_END);
-	int e = at < 0 || write_all(s->fd, buf, RECHDR + len) || fsync(s->fd) ? STORE_EIO : STORE_OK;
+	int e = at < 0 || write_all(s->fd, buf, RECHDR + len) || plat_fsync(s->fd) ? STORE_EIO : STORE_OK;
 	wc_wipe(buf, RECHDR + len);
 	free(buf);
 	if (!e) sync_hdr(s);
@@ -357,7 +349,7 @@ static int rewrite(struct store *s, const uint8_t hdr[STORE_HDR], const uint8_t 
 	    path_of(path, sizeof path, s->dir, "store")) return STORE_EIO;
 
 	unlink(tmp);
-	int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+	int fd = plat_open(tmp, O_WRONLY | O_CREAT | O_EXCL | PLAT_NOFOLLOW | PLAT_PRIVATE);
 	if (fd < 0) return STORE_EIO;
 	int e = write_all(fd, hdr, STORE_HDR) ? STORE_EIO : STORE_OK;
 	for (size_t i = 0; !e && i < s->nrec; i++) {
@@ -369,15 +361,15 @@ static int rewrite(struct store *s, const uint8_t hdr[STORE_HDR], const uint8_t 
 		wc_wipe(buf, len);
 		free(buf);
 	}
-	if (!e && fsync(fd)) e = STORE_EIO;
+	if (!e && plat_fsync(fd)) e = STORE_EIO;
 	close(fd);
 	/* the handle for the new store is taken before the rename, not after: an open that
 	 * failed after it would leave the file swapped under a caller told nothing changed */
-	int nfd = e ? -1 : open(tmp, O_WRONLY | O_NOFOLLOW);
+	int nfd = e ? -1 : plat_open(tmp, O_WRONLY | PLAT_NOFOLLOW);
 	if (!e && nfd < 0) e = STORE_EIO;
-	if (!e && rename(tmp, path)) { close(nfd); e = STORE_EIO; }
+	if (!e && plat_rename(tmp, path)) { close(nfd); e = STORE_EIO; }
 	if (e) { unlink(tmp); return e; }
-	sync_dir(s->dir);
+	plat_sync_dir(s->dir);
 
 	close(s->fd);
 	s->fd = nfd;

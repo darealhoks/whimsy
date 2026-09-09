@@ -1,3 +1,7 @@
+#ifdef _WIN32
+#define localtime_r(t, tm) (localtime_s((tm), (t)) ? NULL : (tm))
+#endif
+
 #include "ui_int.h"
 
 
