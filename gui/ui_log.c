@@ -82,9 +82,10 @@ struct fbody {
 static void drop_tex(struct ui *u, size_t i)
 {
 	for (int k = 0; k < WHIMSY_HELD; k++)
-		if (u->tex[k].t && u->tex[k].g == u->g && u->tex[k].i == i) {
+		if (u->tex[k].b && u->tex[k].g == u->g && u->tex[k].i == i) {
 			draw_image_free(u->tex[k].t);
 			u->tex[k].t = NULL;
+			u->tex[k].b = NULL;
 		}
 }
 
@@ -93,20 +94,21 @@ SDL_Texture *tex_for(struct ui *u, size_t i, const uint8_t *b, size_t n,
                             float maxw, float *w, float *h)
 {
 	int k;
+	if (!b) return NULL;
 	for (k = 0; k < WHIMSY_HELD; k++)
-		if (u->tex[k].t && u->tex[k].g == u->g && u->tex[k].i == i) break;
+		if (u->tex[k].b == b && u->tex[k].g == u->g && u->tex[k].i == i) break;
 	if (k == WHIMSY_HELD) {
-		int iw, ih;
-		SDL_Texture *t;
-		for (k = 0; k < WHIMSY_HELD && u->tex[k].t; k++) ;
-		if (k == WHIMSY_HELD) { draw_image_free(u->tex[0].t); u->tex[0].t = NULL; k = 0; }
-		if (!(t = draw_image(u->d, b, n, &iw, &ih))) return NULL;
+		int iw = 0, ih = 0;
+		for (k = 0; k < WHIMSY_HELD && u->tex[k].b; k++) ;
+		if (k == WHIMSY_HELD) { draw_image_free(u->tex[0].t); k = 0; }
+		u->tex[k].t = draw_image(u->d, b, n, &iw, &ih);
 		u->tex[k].g = u->g;
 		u->tex[k].i = i;
-		u->tex[k].t = t;
+		u->tex[k].b = b;
 		u->tex[k].w = iw;
 		u->tex[k].h = ih;
 	}
+	if (!u->tex[k].t) return NULL;
 	file_fit(u->tex[k].w, u->tex[k].h, maxw, w, h);
 	return u->tex[k].t;
 }

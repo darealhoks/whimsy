@@ -355,8 +355,11 @@ int exec(struct ui *u, const char *line)
 			if (!yes(u->ans[0])) return 0;
 			if ((e = whimsy_group_leave(u->w, u->g))) return done(u, e);
 			/* leaving shifts every index above u->g: no tex slot's .g still names its group */
-			for (int k = 0; k < WHIMSY_HELD; k++)
-				if (u->tex[k].t) { draw_image_free(u->tex[k].t); u->tex[k].t = NULL; }
+			for (int k = 0; k < WHIMSY_HELD; k++) {
+				draw_image_free(u->tex[k].t);
+				u->tex[k].t = NULL;
+				u->tex[k].b = NULL;
+			}
 			select_group(u, 0, 0);
 			return 0;
 		}
@@ -503,8 +506,11 @@ int exec(struct ui *u, const char *line)
 		}
 		if (strcmp(u->ans[0], "nuke")) { ui_err(u, "not nuked"); return 0; }
 		e = whimsy_nuke(u->w);
-		for (int k = 0; k < WHIMSY_HELD; k++)
-			if (u->tex[k].t) { draw_image_free(u->tex[k].t); u->tex[k].t = NULL; }
+		for (int k = 0; k < WHIMSY_HELD; k++) {
+			draw_image_free(u->tex[k].t);
+			u->tex[k].t = NULL;
+			u->tex[k].b = NULL;
+		}
 		u->act_i = (size_t)-1;
 		select_group(u, 0, 0);
 		return done(u, e);
@@ -537,14 +543,14 @@ void run_line(struct ui *u)
 	} else {
 		if (u->comp.buf[0] == ':' && u->pop_sel > 0) complete(u);   /* enter takes the highlight */
 		snprintf(u->pend, sizeof u->pend, "%s", u->comp.buf + 1);
-		u->nans = 0;
+		ans_clear(u);
 	}
 	memset(&u->comp, 0, sizeof u->comp);
 	u->ninfo = 0;
 	u->pop_sel = 0;
 	if (!exec(u, u->pend)) {
 		u->pend[0] = 0;
-		u->nans = 0;
+		ans_clear(u);
 		paste_clean(u);
 		u->comp.secret = 0;
 	}
@@ -677,12 +683,13 @@ static void ment_apply(struct ui *u, const char *name)
 	if (!tok[0]) return;
 	strcat(tok, " ");
 	while (at && u->comp.buf[at - 1] != ' ' && u->comp.buf[at - 1] != '\n') at--;
-	if (at + strlen(tok) >= FIELD_MAX) return;
-	memmove(u->comp.buf + at + strlen(tok), u->comp.buf + cur, u->comp.n - cur);
-	memcpy(u->comp.buf + at, tok, strlen(tok));
-	u->comp.n = u->comp.n - (cur - at) + strlen(tok);
+	size_t tn = strlen(tok), fin = u->comp.n - (cur - at) + tn;
+	if (fin >= FIELD_MAX) return;   /* the moved tail lands past at + tn, not at it */
+	memmove(u->comp.buf + at + tn, u->comp.buf + cur, u->comp.n - cur);
+	memcpy(u->comp.buf + at, tok, tn);
+	u->comp.n = fin;
 	u->comp.buf[u->comp.n] = 0;
-	u->comp.cur = u->comp.anc = at + strlen(tok);
+	u->comp.cur = u->comp.anc = at + tn;
 	u->pop_sel = 0;
 }
 

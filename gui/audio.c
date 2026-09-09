@@ -5,36 +5,7 @@
 #include <SDL3/SDL.h>
 
 #include "audio.h"
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wpedantic"
-#pragma GCC diagnostic ignored "-Wsign-compare"
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
-#pragma GCC diagnostic ignored "-Wunused-function"
-#pragma GCC diagnostic ignored "-Wcast-qual"
-#pragma GCC diagnostic ignored "-Wdouble-promotion"
-#pragma GCC diagnostic ignored "-Wconversion"
-#pragma GCC diagnostic ignored "-Wshadow"
-#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
-#ifndef __clang__
-#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-#endif
-#ifdef __clang__
-#pragma GCC diagnostic ignored "-Wcomma"
-#pragma GCC diagnostic ignored "-Wextra-semi-stmt"
-#endif
-#define DR_MP3_IMPLEMENTATION
-#define DR_MP3_NO_STDIO
-#include "dr_mp3.h"
-#define STB_VORBIS_NO_STDIO
-#define STB_VORBIS_NO_PUSHDATA_API
-#include "stb_vorbis.c"
-#pragma GCC diagnostic pop
-
-/* the ceiling is on the decoded pcm, not the file, because that is what the allocation
- * follows: ten minutes of s16 stereo is about 100 MB from a 10 MB mp3 */
-#define PCM_MAX (192u << 20)
+#include "media.h"
 
 static struct {
 	size_t g, i;
@@ -80,31 +51,18 @@ static const char *decode(const char *ext, const void *b, size_t n, SDL_AudioSpe
 		if (!SDL_LoadWAV_IO(io, true, spec, &A.pcm, &len)) return "will not decode";
 		A.sdlmem = 1;
 		A.n = len;
-	} else if (!strcmp(ext, "mp3")) {
-		drmp3_config cfg;
-		drmp3_uint64 frames = 0;
-		drmp3_int16 *pcm;
-		memset(&cfg, 0, sizeof cfg);
-		if (!(pcm = drmp3_open_memory_and_read_pcm_frames_s16(b, n, &cfg, &frames, NULL)))
-			return "will not decode";
-		A.pcm = (uint8_t *)pcm;
-		A.n = (size_t)frames * cfg.channels * 2;
-		spec->format = SDL_AUDIO_S16;
-		spec->channels = (int)cfg.channels;
-		spec->freq = (int)cfg.sampleRate;
+		if (A.n > MEDIA_MAX_PCM) return "too long to play";
 	} else {
-		int ch = 0, rate = 0, samples;
-		short *pcm = NULL;
-		if ((samples = stb_vorbis_decode_memory(b, (int)n, &ch, &rate, &pcm)) < 0 || !pcm)
-			return "will not decode";
+		short *pcm;
+		int ch, rate;
+		/* media_audio refuses MEDIA_MAX_PCM before the decoder allocates */
+		if (media_audio(ext, b, n, &pcm, &A.n, &ch, &rate)) return "will not decode";
 		A.pcm = (uint8_t *)pcm;
-		A.n = (size_t)samples * (size_t)ch * 2;
 		spec->format = SDL_AUDIO_S16;
 		spec->channels = ch;
 		spec->freq = rate;
 	}
 	if (!A.n || spec->channels <= 0 || spec->freq <= 0) return "empty";
-	if (A.n > PCM_MAX) return "too long to play";
 	A.frame = spec->channels * 2;
 	A.rate = spec->freq;
 	return NULL;

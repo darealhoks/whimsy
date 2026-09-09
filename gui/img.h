@@ -3,13 +3,11 @@
 
 #include <stddef.h>
 
-/* decoded-image ceiling, shared by img_* and draw_image: attacker-controlled bytes
- * declare these dimensions and the decode allocates w*h*comp before anyone looks */
-#define IMG_MAX_DIM 8192
-#define IMG_MAX_PX  (1 << 24)
-
-/* The stb single headers live here. Exactly one .c defines IMG_IMPLEMENTATION and
- * gets stbi_* / stbir_* / stbi_write_* along with it; that TU is gui/draw.c. */
+/* Decoding is not here: every image, ours or a peer's, comes back through
+ * core/media.h, the one fuzzed door to stb_image. What lives here is the outgoing
+ * half -- resize and jpeg encode -- of pixels media_image already bounded.
+ * Exactly one .c defines IMG_IMPLEMENTATION and gets stbir_* / stbi_write_*
+ * along with it; that TU is gui/draw.c. */
 
 /* Decode src, downscale and re-encode as jpeg until the result is <= cap bytes.
  * *out is malloc'd on success (0), untouched on failure (-1). */
@@ -48,10 +46,6 @@ int img_avatar(const void *src, size_t n, int px, size_t cap, void **out, size_t
 #pragma clang attribute push(__attribute__((no_sanitize("undefined"))), apply_to = function)
 #endif
 
-#define STBI_NO_STDIO
-#define STBI_MAX_DIMENSIONS IMG_MAX_DIM
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize2.h"
 #define STBI_WRITE_NO_STDIO
@@ -67,6 +61,8 @@ int img_avatar(const void *src, size_t n, int px, size_t cap, void **out, size_t
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "media.h"
 
 struct img_buf { unsigned char *p; size_t n, cap; int bad; };
 
@@ -102,11 +98,9 @@ static int img_jpeg(unsigned char *px, int w, int h, size_t cap, void **out, siz
 int img_avatar_rect(const void *src, size_t n, float sx, float sy, float side,
                     int px, size_t cap, void **out, size_t *out_n)
 {
-	int w, h, comp;
-	if (n > INT_MAX || px < 1) return -1;
-	unsigned char *in = stbi_load_from_memory(src, (int)n, &w, &h, &comp, 3);
-	if (!in) return -1;
-	if ((long long)w * h > IMG_MAX_PX) { free(in); return -1; }
+	int w, h;
+	unsigned char *in;
+	if (px < 1 || media_image(src, n, 3, &in, &w, &h)) return -1;
 
 	int max = w < h ? w : h;
 	int s = side > 0 ? (int)(side + 0.5f) : max, x, y;
@@ -140,11 +134,9 @@ int img_avatar(const void *src, size_t n, int px, size_t cap, void **out, size_t
 
 int img_shrink(const void *src, size_t n, size_t cap, void **out, size_t *out_n)
 {
-	int w, h, comp;
-	if (n > INT_MAX) return -1;
-	unsigned char *px = stbi_load_from_memory(src, (int)n, &w, &h, &comp, 3);
-	if (!px) return -1;
-	if ((long long)w * h > IMG_MAX_PX) { free(px); return -1; }
+	int w, h;
+	unsigned char *px;
+	if (media_image(src, n, 3, &px, &w, &h)) return -1;
 
 	int q = 85;
 	for (int step = 0; step < 12; step++) {
