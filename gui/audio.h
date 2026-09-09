@@ -4,7 +4,7 @@
 #include <stddef.h>
 
 /* One sound at a time, owned by the row (g, i) that started it. wav decodes through
- * SDL, mp3 and ogg vorbis through the vendored decoders in gui/audio.c. Bytes reach a
+ * SDL, mp3 and ogg vorbis through core/media.c. Bytes reach a
  * decoder only on a click, never on paint. */
 
 enum { AUDIO_OFF, AUDIO_PAUSED, AUDIO_PLAYING };

@@ -592,15 +592,13 @@ void draw_circle(struct draw *d, float cx, float cy, float r, const uint8_t rgb[
 
 SDL_Texture *draw_image(struct draw *d, const void *bytes, size_t n, int *w, int *h)
 {
-	int iw, ih, comp;
-	if (n > INT_MAX) return NULL;
-	unsigned char *px = stbi_load_from_memory(bytes, (int)n, &iw, &ih, &comp, 4);
-	if (!px) return NULL;
-	if ((long long)iw * ih > IMG_MAX_PX) { stbi_image_free(px); return NULL; }
+	int iw, ih;
+	unsigned char *px;
+	if (media_image(bytes, n, 4, &px, &iw, &ih)) return NULL;
 	SDL_Surface *s = SDL_CreateSurfaceFrom(iw, ih, SDL_PIXELFORMAT_RGBA32, px, iw * 4);
 	SDL_Texture *t = s ? SDL_CreateTextureFromSurface(d->r, s) : NULL;
 	SDL_DestroySurface(s);
-	stbi_image_free(px);
+	free(px);
 	if (!t) return NULL;
 	SDL_SetTextureScaleMode(t, SDL_SCALEMODE_LINEAR);
 	if (w) *w = iw;

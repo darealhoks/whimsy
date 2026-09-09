@@ -98,9 +98,11 @@ struct ui {
 	char set_font[SET_FONTS][DRAW_FONT_MAX];
 	int set_nfont, set_fsel;        /* the suggestions under a font field */
 	/* one decoded texture per held file; a slot goes when whimsy_file_open stops
-	 * handing the bytes over */
-	struct { size_t g, i; SDL_Texture *t; int w, h; } tex[WHIMSY_HELD];
-	/* one per key with an avatar. src is the core's pointer: a new one means new bytes */
+	 * handing the bytes over. a taken slot has b set and t NULL when the bytes did not
+	 * decode: without that the log re-decodes the row on every frame */
+	struct { size_t g, i; const uint8_t *b; SDL_Texture *t; int w, h; } tex[WHIMSY_HELD];
+	/* one per key with an avatar. src is the core's pointer: a new one means new bytes.
+	 * src set with t NULL is a remembered decode failure, same reason */
 	struct { uint8_t key[WHIMSY_PK]; int grp; const uint8_t *src; SDL_Texture *t;
 	         int w, h; uint64_t used; } av[AVATARS];
 	uint64_t avclock;
@@ -151,6 +153,8 @@ struct ui {
 };
 
 
+/* drop the answers a question collected; `:pass` leaves store passphrases in them */
+void ans_clear(struct ui *u);
 void arm(struct ui *u, int mode, size_t i);
 void cancel(struct ui *u);
 uint16_t chan_id(struct ui *u);

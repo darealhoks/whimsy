@@ -132,28 +132,24 @@ static SDL_Texture *avatar_of(struct ui *u, const uint8_t *key, int grp, int *iw
 	if (!src || !n) return NULL;
 
 	for (int i = 0; i < AVATARS; i++) {
-		if (u->av[i].t && u->av[i].grp == grp && !memcmp(u->av[i].key, key, kn)) {
+		if (u->av[i].src && u->av[i].grp == grp && !memcmp(u->av[i].key, key, kn)) {
 			slot = i;
 			break;
 		}
-		if (!u->av[i].t) { if (slot < 0) slot = i; continue; }
+		if (!u->av[i].src) { if (slot < 0) slot = i; continue; }
 		if (u->av[i].used < u->av[old].used) old = i;
 	}
 	if (slot < 0) slot = old;
-	if (u->av[slot].t && u->av[slot].src != src) {
+	if (u->av[slot].src != src) {
 		draw_image_free(u->av[slot].t);
-		u->av[slot].t = NULL;
-	}
-	if (!u->av[slot].t) {
-		SDL_Texture *t = draw_image(u->d, src, n, &u->av[slot].w, &u->av[slot].h);
-		if (!t) return NULL;
+		u->av[slot].t = draw_image(u->d, src, n, &u->av[slot].w, &u->av[slot].h);
 		memset(u->av[slot].key, 0, WHIMSY_PK);
 		memcpy(u->av[slot].key, key, kn);
 		u->av[slot].grp = grp;
 		u->av[slot].src = src;
-		u->av[slot].t = t;
 	}
 	u->av[slot].used = ++u->avclock;
+	if (!u->av[slot].t) return NULL;
 	*iw = u->av[slot].w;
 	*ih = u->av[slot].h;
 	return u->av[slot].t;
@@ -371,6 +367,7 @@ void ui_paint(struct ui *u, float W, float H, float scale)
 	{
 		uint8_t who[4 * WHIMSY_PK];
 		size_t nt = whimsy_typers(u->w, u->g, chan_id(u), who, 4);
+		if (nt > 4) nt = 4;             /* whimsy.h documents it snprintf-style */
 		if (nt) {
 			char line[256];
 			int at = 0;

@@ -71,8 +71,9 @@ static void step_channel(struct ui *u, int delta)
 void run_cmd(struct ui *u, const char *line)
 {
 	snprintf(u->pend, sizeof u->pend, "%s", line);
-	u->nans = u->ninfo = 0;
-	if (!exec(u, u->pend)) { u->pend[0] = 0; u->nans = 0; }
+	ans_clear(u);
+	u->ninfo = 0;
+	if (!exec(u, u->pend)) { u->pend[0] = 0; ans_clear(u); }
 }
 
 /* ctrl+v with an image or a file url on the clipboard sends it instead of typing it.

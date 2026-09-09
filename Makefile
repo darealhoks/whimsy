@@ -1,6 +1,6 @@
 MODE ?= dev
 CC ?= cc
-CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -Icore -Ivendor/monocypher -D_DEFAULT_SOURCE
+CFLAGS := -std=c11 -Wall -Wextra -Wpedantic -Icore -Ivendor/monocypher -Ivendor/stb -Ivendor/dr -D_DEFAULT_SOURCE
 ifeq ($(MODE),dev)
 CFLAGS += -Werror -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer
 LDFLAGS += -fsanitize=address,undefined
@@ -54,7 +54,7 @@ test: all $(wildcard tests/*.c)
 # fuzz targets live in tests/fuzz_*.c, one LLVMFuzzerTestOneInput each
 fuzz: $(CORE)
 	@for f in tests/fuzz_*.c; do \
-	  clang -std=c11 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -Icore -Igui -Ivendor/monocypher -D_DEFAULT_SOURCE -o build/$$(basename $$f .c) $$f $(CORE) || exit 1; done
+	  clang -std=c11 -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -Icore -Igui -Ivendor/monocypher -Ivendor/stb -Ivendor/dr -D_DEFAULT_SOURCE -o build/$$(basename $$f .c) $$f $(CORE) || exit 1; done
 
 clean:
 	rm -rf build

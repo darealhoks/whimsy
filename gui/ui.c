@@ -35,6 +35,12 @@ void paste_clean(struct ui *u)
 	u->pastetmp[0] = 0;
 }
 
+void ans_clear(struct ui *u)
+{
+	memset(u->ans, 0, sizeof u->ans);
+	u->nans = 0;
+}
+
 /* drop whatever the composer was armed with: a mode, or a question a command asked */
 void cancel(struct ui *u)
 {
@@ -43,7 +49,8 @@ void cancel(struct ui *u)
 	u->ask[0] = u->pend[0] = 0;
 	u->ask_typing = 0;
 	paste_clean(u);
-	u->nans = u->ninfo = 0;
+	ans_clear(u);
+	u->ninfo = 0;
 	u->find[0] = 0;
 }
 
@@ -139,15 +146,18 @@ void typed(struct ui *u)
 /* ---- notifications ---- */
 
 /* the sender's avatar bytes dropped in the cache so %a can name a file. empty when
- * there is none: the command gets an empty word rather than a missing one */
+ * there is none: the command gets an empty word rather than a missing one. the file is
+ * cleartext and never removed, so it is written only for a command that asked for it */
 static void avatar_path(struct ui *u, const uint8_t *pk, char *out, size_t cap)
 {
 	char dir[512], hex[2 * WHIMSY_PK + 1];
 	const char *xdg = getenv("XDG_CACHE_HOME"), *home = getenv("HOME");
 	size_t n = 0;
-	const uint8_t *b = u->c->avatars < 0.5 ? NULL : whimsy_avatar_get(u->w, pk, &n);
+	const uint8_t *b;
 
 	out[0] = 0;
+	if (!strstr(u->c->notify, "%a")) return;
+	b = u->c->avatars < 0.5 ? NULL : whimsy_avatar_get(u->w, pk, &n);
 	if (!b || !n) return;
 	if (xdg && *xdg) snprintf(dir, sizeof dir, "%s/whimsy", xdg);
 	else snprintf(dir, sizeof dir, "%s/.cache/whimsy", home ? home : "/tmp");
@@ -328,6 +338,7 @@ int ui_open(struct ui **out, struct whimsy *w, struct draw *d, struct conf *c, S
 void ui_close(struct ui *u)
 {
 	if (!u) return;
+	SDL_ClearClipboardData();       /* sdl still holds u as the clip_done userdata */
 	audio_stop();
 	crop_close(u);
 	for (int k = 0; k < WHIMSY_HELD; k++) draw_image_free(u->tex[k].t);
