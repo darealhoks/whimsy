@@ -8,7 +8,7 @@ Only has groups with channels; a DM is a group of two. The server is a dumb rela
 ciphertext for 30 days and knows nothing else. Nobody joins without an invite minted by
 whoever runs that server.
 
-C11, Monocypher vendored, no other dependency in the core. The GUI wants SDL3 and FreeType, plus vendored stb image headers.
+C11, Monocypher vendored, no other dependency in the core. The GUI wants SDL3 and FreeType, plus the vendored stb and dr_mp3 headers.
 
 ## Install
 
@@ -61,12 +61,13 @@ No device key sync either; a second device is a second identity, linked to the f
       group.c            membership records, sender chains, message crypto
       store.c            encrypted append-only record file
       text.c             utf-8 validate, strip controls, cell width
+      media.c            the only TU compiling stb_image, dr_mp3 and stb_vorbis
       whimsy*.c          the public api behind core/whimsy.h
     server/whimsyd.c     epoll relay: register, put, fetch, ack, revoke, invites, ttl sweep
     gui/                 the client: SDL3 window, freetype atlas, panes, commands, markdown
 
-Four places parse untrusted bytes: `wire_decode`, `text_sanitize`, `store_read`, and
-Monocypher. Nothing else parses input.
+Seven places parse untrusted bytes: `wire_decode`, `text_sanitize`, `store_read`, `dec_hash`,
+`group_recv`, `media_image`/`media_audio` and `md_scan`, plus Monocypher. Nothing else parses input.
 
 `core/` includes nothing from `server/` or `gui/`. Key material never crosses `whimsy.h`.
 

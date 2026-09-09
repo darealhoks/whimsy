@@ -260,7 +260,8 @@ void whimsy_file_progress(const struct whimsy *w, size_t g, size_t i,
  * itself; nothing is stored, here or on the receiver. */
 int whimsy_typing(struct whimsy *w, size_t g, uint16_t channel);
 /* who is composing in that channel right now, WHIMSY_PK bytes each, ourselves left
- * out; an entry ages out a few seconds after the last one received. snprintf-style */
+ * out; an entry ages out a few seconds after the last one received. writes at most
+ * cap and returns how many, so the return never exceeds cap */
 size_t whimsy_typers(const struct whimsy *w, size_t g, uint16_t channel,
                      uint8_t *out, size_t cap);
 

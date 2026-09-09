@@ -129,7 +129,7 @@ int group_recv_senderkey(struct group *g, const struct identity *me,
 int group_send(struct group *g, const struct identity *me, uint16_t channel, uint8_t kind,
                uint64_t time, const uint8_t *reply, const void *payload, size_t n,
                uint8_t *out, size_t cap, size_t *len);
-/* scratch needs WIRE_MAX_BODY; m->payload points into it */
+/* scratch needs GROUP_MAX_PTB; m->payload points into it */
 int group_recv(struct group *g, const uint8_t *blob, size_t n,
                uint8_t *scratch, size_t cap, struct group_msg *m);
 

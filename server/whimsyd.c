@@ -46,7 +46,7 @@
 #define SWEEP_BOXES 32          /* mailboxes one sweep tick walks before resuming next tick */
 #define OUT_MAX     (1u << 18)  /* a fetch stops filling c->out past this; the client refetches */
 #define FETCH_BLOBS 256         /* blobs one fetch streams; must stay under FETCH_MAX in
-                                 * core/whimsy.c, which drops the socket at it */
+                                 * core/whimsy_recv.c, which drops the socket at it */
 #define REQ_BURST   512         /* token bucket per connection */
 #define REQ_RATE    256
 

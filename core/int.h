@@ -30,7 +30,7 @@ _Static_assert(WHIMSY_FP_LEN == ID_FP_LEN, "fingerprint length must track identi
  *             kind bit 7 set: index u32 | reply id[36] (zeroed when not a reply) sit between
  *             sender and the text. clear on records written before replies existed, which
  *             carry no message id and so cannot be replied to. bit 6: the text is an edit's,
- *             bit 5: a tombstone, no text at all
+ *             bit 5: an old store's tombstone; such a record is not loaded
  *   VOID      nothing; a record dropped in place by whimsy_drop
  *   PETNAME   pk[32] | sanitized label; the newest one for a pk wins, empty clears
  *   REACT     group[16] | msgid[36] | sender[32] | sanitized text; the newest one for a
