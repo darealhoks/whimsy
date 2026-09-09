@@ -129,6 +129,19 @@ size_t whimsy_search(const struct whimsy *w, size_t g, const char *needle,
                                  * server/whimsyd.c streams fewer than this per fetch */
 #define MAX_GROUPS  128         /* a relay can hand us unsolicited senderkeys forever */
 
+/* a cid picks a chain in every group at once, so one already held elsewhere would make
+ * each blob for it ratchet through both chains: MAX_GROUPS of them is the amplifier */
+static int cid_taken(const struct whimsy *w, const struct grp *gr, const uint8_t cid[32])
+{
+	for (size_t i = 0; i < w->ng; i++) {
+		if (w->g[i] == gr) continue;
+		if (wc_equal(w->g[i]->g.send.cid, cid, 32)) return 1;
+		for (uint8_t j = 0; j < w->g[i]->g.nrecv; j++)
+			if (wc_equal(w->g[i]->g.recv[j].cid, cid, 32)) return 1;
+	}
+	return 0;
+}
+
 static int co_member(const struct whimsy *w, const uint8_t pk[32])
 {
 	for (size_t g = 0; g < w->ng; g++) if (group_has(&w->g[g]->g, pk)) return 1;
@@ -159,6 +172,10 @@ static int ingest_sealed(struct whimsy *w, const uint8_t *b, size_t n)
 	if (inner[0] == WIRE_I_SENDERKEY &&
 	    wire_decode_senderkey(inner, inner_n, &sk) == WIRE_OK) {
 		gr = find_grp(w, sk.group);
+		if (cid_taken(w, gr, sk.cid)) {
+			wc_wipe(w->pt, sizeof w->pt);
+			return 0;
+		}
 		int fresh = !gr;
 		/* the fresh branch only: a block never touches a group we already joined */
 		if (fresh && whimsy_blocked(w, sk.rec.owner)) {
@@ -244,7 +261,7 @@ static int ingest(struct whimsy *w, const uint8_t *b, size_t n)
 		/* no chain anywhere: either garbage, or a member sent before their re-seal
 		 * reached us. withhold the ack only while some member's chain is missing */
 		for (size_t i = 0; i < w->ng; i++)
-			if ((size_t)(w->g[i]->g.nrecv + 1) < group_member_count(&w->g[i]->g)) return -2;
+			if ((size_t)(group_chain_count(&w->g[i]->g) + 1) < group_member_count(&w->g[i]->g)) return -2;
 		return 0;
 	}
 	if (e) { wc_wipe(w->scratch, sizeof w->scratch); return 0; }

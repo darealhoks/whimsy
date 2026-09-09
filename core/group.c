@@ -85,6 +85,14 @@ static void chain_mark(struct group_chain *c, uint32_t index)
 	if (adv) chain_slide(c, adv);
 }
 
+/* group_forget leaves the chain in place with a zeroed key, so the highest index we
+ * ever accepted from that sender, and the cid it came on, outlive it */
+static int chain_dead(const struct group_chain *c)
+{
+	static const uint8_t zero[32] = { 0 };
+	return wc_equal(c->ck, zero, 32);
+}
+
 /* membership */
 
 void group_id(uint8_t id[16], const uint8_t owner[32], const uint8_t salt[16])
@@ -416,11 +424,23 @@ void group_forget(struct group *g, const uint8_t pk[32])
 {
 	for (uint8_t i = 0; i < g->nrecv; i++)
 		if (wc_equal(g->recv[i].pk, pk, 32)) {
-			wc_wipe(&g->recv[i], sizeof g->recv[i]);
-			g->recv[i] = g->recv[--g->nrecv];
-			wc_wipe(&g->recv[g->nrecv], sizeof g->recv[g->nrecv]);
+			struct group_chain *c = &g->recv[i];
+			uint32_t hw = c->base;
+			for (uint32_t d = GROUP_SKIP; d-- > 0;)
+				if (c->seen[d / 8] & 1u << d % 8) { hw = c->base + d + 1; break; }
+			wc_wipe(c->ck, sizeof c->ck);
+			wc_wipe(c->hk, sizeof c->hk);
+			memset(c->seen, 0, sizeof c->seen);
+			c->base = hw;   /* the entry stays: dropping it would let an old chain back in */
 			return;
 		}
+}
+
+uint8_t group_chain_count(const struct group *g)
+{
+	uint8_t n = 0;
+	for (uint8_t i = 0; i < g->nrecv; i++) if (!chain_dead(&g->recv[i])) n++;
+	return n;
 }
 
 int group_seal_to(const struct group *g, const struct identity *me, size_t i,
@@ -518,7 +538,11 @@ int group_recv_senderkey(struct group *g, const struct identity *me,
 	struct group_chain *c = NULL;
 	for (uint8_t i = 0; i < g->nrecv && !c; i++)
 		if (wc_equal(g->recv[i].pk, sender, 32)) c = &g->recv[i];
-	if (c) {
+	if (c && chain_dead(c)) {
+		/* a forgotten chain does not come back on the cid it died on below the index
+		 * we reached: every senderkey a relay can replay under this record is on it */
+		if (sk->index < c->base && wc_equal(sk->cid, c->cid, 32)) return GROUP_EOLD;
+	} else if (c) {
 		/* a re-seal at the position we already hold: keep seen[], chain_init would
 		 * rewind the replay window. anything below it is a replayed senderkey */
 		if (sk->index == c->base && wc_equal(sk->cid, c->cid, 32) &&
@@ -605,7 +629,7 @@ int group_recv(struct group *g, const uint8_t *blob, size_t n,
 
 	struct group_chain *c = NULL;
 	for (uint8_t i = 0; i < g->nrecv && !c; i++)
-		if (wc_equal(g->recv[i].cid, b.hdr, 32)) c = &g->recv[i];
+		if (!chain_dead(&g->recv[i]) && wc_equal(g->recv[i].cid, b.hdr, 32)) c = &g->recv[i];
 	if (!c) return GROUP_ENOCHAIN;
 	uint32_t index = b.aux ^ index_mask(c->hk, b.nonce);
 
