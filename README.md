@@ -17,6 +17,10 @@ C11, Monocypher vendored, no other dependency in the core. The GUI wants SDL3 an
 Builds release from source into `~/.local/share/whimsy/src`, installs `whimsy` and
 `whimsyd` to `~/.local/bin` and a desktop entry. Re-run it to update.
 
+That pipeline trusts github and whatever `main` happens to hold at the moment you run it:
+there is no release tag, no signature and no checksum to verify against, and the script
+compiles and runs what it clones. Read `install.sh` first, or clone and build by hand.
+
 ## Build it yourself
 
     make                       dev build, -Werror + ASan/UBSan   -> build/dev/

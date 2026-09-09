@@ -35,12 +35,14 @@
 #define SWEEP_EVERY 60
 #define BACKLOG     32
 #define MAX_CONN    64
-#define MAX_PER_IP  8
+#define MAX_PER_IP  8       /* MAX_CONN / MAX_PER_IP = 8 distinct prefixes fill the relay */
 #define CONN_TTL    30          /* seconds a half-read frame or an unfinished handshake may sit */
 #define IDLE_TTL    300         /* a live client pings well inside this */
-#define BLOB_NAME_LEN 85        /* 20 digit seq + '.' + 64 hex putter account */
+#define BLOB_TAG_LEN 16         /* hex of a truncated mac, not an account: see blob_tag */
+#define BLOB_NAME_LEN (20 + 1 + BLOB_TAG_LEN)
 #define MAIL_MAX    1024        /* blobs one mailbox may hold before a PUT is refused */
 #define MAIL_BYTES  (64u << 20)
+#define MAIL_SHARE  4           /* of MAIL_MAX and MAIL_BYTES, the most one putter may hold */
 #define SWEEP_BOXES 32          /* mailboxes one sweep tick walks before resuming next tick */
 #define OUT_MAX     (1u << 18)  /* a fetch stops filling c->out past this; the client refetches */
 #define FETCH_BLOBS 256         /* blobs one fetch streams; must stay under FETCH_MAX in
@@ -49,7 +51,7 @@
 #define REQ_RATE    256
 
 static const char *datadir;
-static uint8_t srv_sk[32], srv_pk[32];
+static uint8_t srv_sk[32], srv_pk[32], tag_key[32];
 
 struct conn {
 	struct conn *next;      /* live list, walked by the sweep tick */
@@ -147,6 +149,7 @@ static int key_load(void)
 		}
 	}
 	wc_x25519_pk(srv_pk, srv_sk);
+	wc_kdf(tag_key, srv_sk, "whimsyd blob tag");
 	return 0;
 }
 
@@ -170,6 +173,19 @@ static int mailbox_dir(char *out, size_t cap, const uint8_t mb[32])
 	char hex[65];
 	wire_hex(hex, mb, 32);
 	return snprintf(out, cap, "%s/mail/%s", datadir, hex) >= (int)cap ? -1 : 0;
+}
+
+/* who put a blob, for eviction and REVOKE, without writing an account onto the relay disk:
+ * keyed by the persistent server key so it survives a restart, and bound to the mailbox so
+ * it cannot be joined across mailboxes into a sender->recipient edge list */
+static void blob_tag(char out[BLOB_TAG_LEN + 1], const uint8_t putter[32], const uint8_t mb[32])
+{
+	uint8_t m[96], h[BLOB_TAG_LEN / 2];
+	memcpy(m, tag_key, 32);
+	memcpy(m + 32, putter, 32);
+	memcpy(m + 64, mb, 32);
+	wc_hash(h, sizeof h, m, sizeof m);
+	wire_hex(out, h, sizeof h);
 }
 
 /* microseconds, forced strictly increasing: the seq is also the file name */
@@ -310,7 +326,14 @@ static void do_register(struct conn *c, const struct wire_frame *f)
 	put_simple(c, WIRE_F_DONE);
 }
 
-/* 0 to accept, -1 to refuse. a full box costs the putter its own oldest blob and only
+static int mail_over(unsigned long n, unsigned long bytes, unsigned long mn, unsigned long mbytes)
+{
+	return n >= MAIL_MAX || bytes > MAIL_BYTES ||
+	       mn >= MAIL_MAX / MAIL_SHARE || mbytes > MAIL_BYTES / MAIL_SHARE;
+}
+
+/* 0 to accept, -1 to refuse. a putter holds at most a MAIL_SHARE'th of a box, so no sender
+ * can wedge delivery for the rest, and over that share it costs its own oldest blob and only
  * ever its own: no put can steer a deletion onto another account's ciphertext.
  * ponytail: one readdir+stat pass per put (<= MAIL_MAX entries), and at most EVICT
  * evictions; a per-mailbox counter file if that pass ever shows up in a profile */
@@ -321,7 +344,7 @@ static int mail_admit(const char *dir, size_t adding, const char *tag)
 	if (!d) return 0;
 	struct { char name[BLOB_NAME_LEN + 1]; unsigned long size; } mine[EVICT];
 	int nm = 0;
-	unsigned long n = 0, bytes = adding;
+	unsigned long n = 0, bytes = adding, mn = 0, mbytes = adding;
 	struct dirent *e;
 	while ((e = readdir(d))) {
 		char p[PATHMAX];
@@ -329,9 +352,11 @@ static int mail_admit(const char *dir, size_t adding, const char *tag)
 		if (e->d_name[0] == '.' || PJ(p, "%s/%s", dir, e->d_name) || stat(p, &st)) continue;
 		n++;
 		bytes += (unsigned long)st.st_size;
-		/* names are BLOB_NAME_LEN long, "<20 digit seq>.<putter account hex>", so they
-		 * sort oldest first and carry who may drop them */
+		/* names are BLOB_NAME_LEN long, "<20 digit seq>.<tag>", so they sort oldest first
+		 * and carry who may drop them */
 		if (strlen(e->d_name) != BLOB_NAME_LEN || strcmp(e->d_name + 21, tag)) continue;
+		mn++;
+		mbytes += (unsigned long)st.st_size;
 		if (nm == EVICT && strcmp(e->d_name, mine[EVICT - 1].name) > 0) continue;
 		int i = nm < EVICT ? nm++ : EVICT - 1;
 		for (; i && strcmp(e->d_name, mine[i - 1].name) < 0; i--) mine[i] = mine[i - 1];
@@ -339,32 +364,35 @@ static int mail_admit(const char *dir, size_t adding, const char *tag)
 		mine[i].size = (unsigned long)st.st_size;
 	}
 	closedir(d);
-	for (int i = 0; (n >= MAIL_MAX || bytes > MAIL_BYTES) && i < nm; i++) {
+	for (int i = 0; mail_over(n, bytes, mn, mbytes) && i < nm; i++) {
 		char p[PATHMAX];
 		if (PJ(p, "%s/%s", dir, mine[i].name) || unlink(p)) break;
 		n--;
+		mn--;
 		bytes -= mine[i].size;
+		mbytes -= mine[i].size;
 	}
-	return n >= MAIL_MAX || bytes > MAIL_BYTES ? -1 : 0;
+	return mail_over(n, bytes, mn, mbytes) ? -1 : 0;
 }
 
 static void do_put(struct conn *c, const struct wire_frame *f)
 {
 	uint8_t xpk[32], mb[32];
+	static const uint8_t sink[32];
 	char dir[PATHMAX], p[PATHMAX];
 	wc_x25519_from_sign_pk(xpk, f->put.mailbox);
-	/* an unknown mailbox discards, and answers a seq drawn the same way a real put
-	 * would: a fixed reply (0, or an error) is an account oracle */
-	if (account_load(xpk, mb) || !wc_equal(mb, f->put.mailbox, 32)) {
-		put_putok(c, next_seq());
-		return;
-	}
-	if (mailbox_dir(dir, sizeof dir, f->put.mailbox) || mkdirp(dir)) {
+	/* a put to an unknown mailbox lands in one shared sink box under the same admission,
+	 * write and reply as a real one: anything cheaper is an account oracle, by timing and
+	 * by never answering WIRE_E_FULL. all sink blobs of a putter share one tag, so the
+	 * sink is under the same per-putter share */
+	int known = !account_load(xpk, mb) && wc_equal(mb, f->put.mailbox, 32);
+	if ((known ? mailbox_dir(dir, sizeof dir, f->put.mailbox)
+	           : PJ(dir, "%s/mail/sink", datadir)) || mkdirp(dir)) {
 		put_err(c, WIRE_E_INTERNAL);
 		return;
 	}
-	char tag[65];
-	wire_hex(tag, c->mailbox, 32);
+	char tag[BLOB_TAG_LEN + 1];
+	blob_tag(tag, c->mailbox, known ? f->put.mailbox : sink);
 	if (mail_admit(dir, f->put.blob_n, tag)) { put_err(c, WIRE_E_FULL); return; }
 	uint64_t seq;
 	for (;;) {
@@ -391,14 +419,14 @@ static void do_fetch(struct conn *c)
 	int n = scandir(dir, &ents, seq_name, alphasort);
 	if (n < 0) { put_simple(c, WIRE_F_DONE); return; }
 
-	int sent = 0;
-	for (int i = 0; i < n && sent < FETCH_BLOBS; i++) {
+	/* one token buys at most FETCH_BLOBS entries of work, however long the box is */
+	for (int i = 0; i < n && i < FETCH_BLOBS; i++) {
 		struct stat st;
 		if (PJ(p, "%s/%s", dir, ents[i]->d_name) || stat(p, &st) ||
 		    st.st_size <= 0 || st.st_size > WIRE_MAX_PAYLOAD - 8) continue;
 		/* the whole encoded blob frame must fit; the rest waits for the next fetch */
 		if (c->out_n + WIRE_HDR + WIRE_FRAME_HDR + 8 + (size_t)st.st_size + NOISE_TAG >
-		    OUT_MAX) continue;
+		    OUT_MAX) break;
 		uint8_t *b = malloc((size_t)st.st_size);
 		if (b && !read_exact(p, b, (size_t)st.st_size)) {
 			struct wire_frame f = { .type = WIRE_F_BLOB };
@@ -406,7 +434,6 @@ static void do_fetch(struct conn *c)
 			f.blob.blob = b;
 			f.blob.blob_n = (size_t)st.st_size;
 			put_frame(c, &f);
-			sent++;
 		}
 		free(b);
 	}
@@ -429,12 +456,12 @@ static void do_ack(struct conn *c, const struct wire_frame *f)
 }
 
 /* the putter unlinks its own blob from a mailbox it wrote to. the name carries the
- * account that put it, so a restart keeps the check; always DONE, since telling a
+ * putter's tag, so a restart keeps the check; always DONE, since telling a
  * caller whether a seq exists or is someone else's is an oracle */
 static void do_revoke(struct conn *c, const struct wire_frame *f)
 {
-	char dir[PATHMAX], p[PATHMAX], name[96], tag[65];
-	wire_hex(tag, c->mailbox, 32);
+	char dir[PATHMAX], p[PATHMAX], name[96], tag[BLOB_TAG_LEN + 1];
+	blob_tag(tag, c->mailbox, f->revoke.mailbox);
 	if (!mailbox_dir(dir, sizeof dir, f->revoke.mailbox) &&
 	    !PJ(name, "%020llu.%s", (unsigned long long)f->revoke.seq, tag) &&
 	    !PJ(p, "%s/%s", dir, name))
@@ -557,27 +584,36 @@ static void sweep(void)
 	if (!d) return;
 	struct dirent *e;
 	char box[PATHMAX];
-	/* a tick walks SWEEP_BOXES mailboxes and resumes at the next one: bounded stall on a
-	 * populated relay, at the cost of a ttl that lags when there are many mailboxes */
-	static unsigned long skip;
-	unsigned long seen = 0, done = 0;
+	/* a tick sweeps the SWEEP_BOXES names ordered after the last one swept: readdir order
+	 * is not stable across opendir calls, so a positional resume starves boxes forever */
+	static char last[256];
+	char next[SWEEP_BOXES][256];
+	int nn = 0;
 	while ((e = readdir(d))) {
-		if (e->d_name[0] == '.') continue;
-		if (seen++ < skip) continue;
-		if (done++ >= SWEEP_BOXES) break;
-		if (PJ(box, "%s/mail/%s", datadir, e->d_name)) continue;
-		sweep_files(box, now - BLOB_TTL);
+		if (e->d_name[0] == '.' || strlen(e->d_name) >= sizeof next[0]) continue;
+		if (last[0] && strcmp(e->d_name, last) <= 0) continue;
+		if (nn == SWEEP_BOXES && strcmp(e->d_name, next[SWEEP_BOXES - 1]) > 0) continue;
+		int i = nn < SWEEP_BOXES ? nn++ : SWEEP_BOXES - 1;
+		for (; i && strcmp(e->d_name, next[i - 1]) < 0; i--)
+			memcpy(next[i], next[i - 1], sizeof next[0]);
+		snprintf(next[i], sizeof next[i], "%s", e->d_name);
 	}
-	skip = e ? skip + done : 0;
 	closedir(d);
+	for (int i = 0; i < nn; i++)
+		if (!PJ(box, "%s/mail/%s", datadir, next[i])) sweep_files(box, now - BLOB_TTL);
+	if (nn == SWEEP_BOXES) snprintf(last, sizeof last, "%s", next[nn - 1]);
+	else last[0] = 0;
 }
 
 static void ip_of(uint8_t out[16], const struct sockaddr_storage *ss)
 {
 	memset(out, 0, 16);
-	if (ss->ss_family == AF_INET6)
-		memcpy(out, &((const struct sockaddr_in6 *)ss)->sin6_addr, 16);
-	else if (ss->ss_family == AF_INET)
+	if (ss->ss_family == AF_INET6) {
+		const struct in6_addr *a = &((const struct sockaddr_in6 *)ss)->sin6_addr;
+		/* a routed /64 is one host, and all 128 bits would give it 2^64 slots.
+		 * v4-mapped addresses keep all 32 bits of the v4 half */
+		memcpy(out, a, IN6_IS_ADDR_V4MAPPED(a) ? 16 : 8);
+	} else if (ss->ss_family == AF_INET)
 		memcpy(out + 12, &((const struct sockaddr_in *)ss)->sin_addr, 4);
 }
 
