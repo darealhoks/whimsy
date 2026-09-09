@@ -13,6 +13,7 @@ static const char NAME[] = "Noise_IK_25519_ChaChaPoly_BLAKE2b";
 static void hmac(uint8_t out[HASH], const uint8_t key[HASH], const uint8_t *m, size_t n)
 {
 	uint8_t buf[BLOCK + HASH + 1], inner[HASH];
+	if (n > HASH + 1) { memset(out, 0, HASH); return; }   /* buf is exact-fit; a garbage prf is loud */
 	memset(buf, 0x36, BLOCK);
 	for (int i = 0; i < HASH; i++) buf[i] ^= key[i];
 	if (n) memcpy(buf + BLOCK, m, n);
@@ -41,7 +42,9 @@ static void hkdf(uint8_t o1[HASH], uint8_t o2[HASH], const uint8_t ck[HASH],
 
 static void mix_hash(struct noise *s, const uint8_t *p, size_t n)
 {
-	uint8_t buf[HASH + 64];         /* appended data is at most enc(s), 48 bytes */
+	uint8_t buf[HASH + 64];
+	_Static_assert(32 + NOISE_TAG <= 64, "mix_hash buf too small for enc(s)");
+	if (n > sizeof buf - HASH) return;       /* skipping the mix breaks the handshake, not the stack */
 	memcpy(buf, s->h, HASH);
 	if (n) memcpy(buf + HASH, p, n);
 	wc_hash(s->h, HASH, buf, HASH + n);
