@@ -225,6 +225,7 @@ static int load(struct store *s, const uint8_t *b, size_t n, size_t *end)
 
 int store_open(struct store **out, const char *dir, const char *pass, size_t *bad)
 {
+	if (pass && !*pass) pass = NULL;        /* empty is no passphrase: fall to the keyfile */
 	*out = NULL;
 	if (mkdir(dir, 0700) && errno != EEXIST) return STORE_EIO;
 
@@ -336,7 +337,9 @@ int store_append(struct store *s, uint8_t kind, const void *rec, size_t n)
 	free(buf);
 	if (!e) sync_hdr(s);
 	if (e) {
-		if (at >= 0 && ftruncate(s->fd, at)) e = STORE_EIO;   /* else the next append lands behind the stump */
+		/* the stump must go before anything else is written: a cut that failed here
+		 * is retried by the next append, which would otherwise seal past it */
+		if (at >= 0 && ftruncate(s->fd, at)) s->cut = at;
 		s->nrec--;
 		wc_wipe(s->rec[s->nrec].p, s->rec[s->nrec].n);
 		free(s->rec[s->nrec].p);
@@ -389,6 +392,8 @@ static int rewrite(struct store *s, const uint8_t hdr[STORE_HDR], const uint8_t 
  * crash before the rename leaves the old store and the old password untouched. */
 int store_rekey(struct store *s, const char *oldpass, const char *newpass)
 {
+	if (oldpass && !*oldpass) oldpass = NULL;
+	if (newpass && !*newpass) newpass = NULL;
 	uint8_t old[32];
 	int e = derive(old, s->hdr, s->dir, oldpass);
 	if (!e && !wc_equal(old, s->key, 32)) e = STORE_EKEY;

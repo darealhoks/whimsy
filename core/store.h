@@ -46,7 +46,8 @@ enum store_kind { STORE_IDENTITY = 1, STORE_SERVER, STORE_GROUP, STORE_MSG, STOR
 
 struct store;
 
-/* dir is created 0700 if missing. pass NULL uses <dir>/key, created 0600 if missing.
+/* dir is created 0700 if missing. pass NULL or empty uses <dir>/key, created 0600 if
+ * missing; there is no unencrypted mode.
  * a tail that does not open is dropped: *bad (when not NULL) is then set to how many
  * records survived, and the file is cut back to them by the next store_append, not
  * before, so a damaged store can still be read. that is only for bytes past the
@@ -56,21 +57,23 @@ void store_close(struct store *s);
 
 int store_append(struct store *s, uint8_t kind, const void *rec, size_t n);
 
-/* reseals every record under a key derived from newpass (NULL: the keyfile, created
- * if missing, and an existing <dir>/key is removed when moving to a passphrase).
+/* reseals every record under a key derived from newpass (NULL or empty: the keyfile,
+ * created if missing, and an existing <dir>/key is removed when moving to a passphrase).
  * STORE_EKEY when oldpass is not what the store is open under. all or nothing:
  * a failure before the new file is in place leaves the old password working. */
 int store_rekey(struct store *s, const char *oldpass, const char *newpass);
 
-/* replaces record i, then rewrites the whole file under the same key: the old bytes
- * leave the disk, which is the point -- an edit or a delete may not keep the old text.
+/* replaces record i, then rewrites the whole file under the same key: the old text is
+ * gone from the file, not from the disk -- a copy-on-write filesystem or an ssd keeps
+ * the old extents, and the key does not change, so treat this as hiding, not erasure.
  * the record index stays valid, so nothing above holds a stale one. */
 int store_replace(struct store *s, size_t i, uint8_t kind, const void *rec, size_t n);
 
-/* voids the n records idx names in one rewrite -- the cost of a single store_replace,
- * not n of them. duplicate indices and any order are fine; an index past the end is
- * STORE_EBIG and nothing is voided. all or nothing: a failure leaves every record as
- * it was and the old key working. record indices survive, as with store_replace. */
+/* voids the n records idx names in one rewrite, with store_replace's disk caveat -- the
+ * cost of a single store_replace, not n of them. duplicate indices and any order are
+ * fine; an index past the end is STORE_EBIG and nothing is voided. all or nothing: a
+ * failure leaves every record as it was and the old key working. record indices
+ * survive, as with store_replace. */
 int store_void_many(struct store *s, const size_t *idx, size_t n);
 
 size_t store_count(const struct store *s);

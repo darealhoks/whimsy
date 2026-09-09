@@ -96,8 +96,11 @@ int group_has(const struct group *g, const uint8_t pk[32]);
 int group_apply_rec(struct group *g, const uint8_t *rec, size_t n);
 
 /* drop the receive chain held for pk, so the next senderkey from them installs whatever
- * cid and index it carries. the way out of a chain the two sides disagree about */
+ * cid it carries, at or past the last index we accepted from them. the way out of a
+ * chain the two sides disagree about */
 void group_forget(struct group *g, const uint8_t pk[32]);
+/* receive chains that can open a blob; one group_forget dropped is not one */
+uint8_t group_chain_count(const struct group *g);
 
 /* anything sealed to one key rides these two. out needs GROUP_MAX_SEAL; inner starts
  * with a wire_inner kind byte. refuses to == ourselves */

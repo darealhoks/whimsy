@@ -63,7 +63,7 @@ struct whimsy_msg {
 	const uint8_t *reply;
 };
 
-/* dir is created 0700 if missing; pass NULL uses <dir>/key. A store with no
+/* dir is created 0700 if missing; pass NULL or empty uses <dir>/key. A store with no
  * identity gets a fresh one. *lost (when not NULL) is set to 1 when anything was
  * dropped -- a torn tail, or a record this build cannot read -- for the frontend to
  * tell the user history was lost. Reported once: the open marks what it dropped, so
@@ -73,7 +73,7 @@ struct whimsy_msg {
 int  whimsy_open(struct whimsy **out, const char *dir, const char *pass, int *lost);
 void whimsy_close(struct whimsy *w);
 /* change what the store is encrypted under, keeping every record. WHIMSY_EKEY when
- * oldpass is not the current one; an empty newpass (NULL) means the keyfile.
+ * oldpass is not the current one; a NULL or empty newpass means the keyfile.
  * see store_rekey in core/store.h */
 int  whimsy_rekey(struct whimsy *w, const char *oldpass, const char *newpass);
 const char *whimsy_strerror(int e);
